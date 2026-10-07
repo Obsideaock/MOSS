@@ -91,7 +91,8 @@ async def list_channels(mc, upto: int = 8) -> None:
     print("\nUse the number next to your testing channel as --channel.")
 
 
-async def listen(mc, seconds: int, data_type: int, show_all: bool = False) -> None:
+async def listen(mc, seconds: int, data_type: int, show_all: bool = False,
+                 poll: float = 1.0) -> None:
     received: dict[int, float] = {}
     corrupt: list[int] = []
     started = time.monotonic()
@@ -133,13 +134,32 @@ async def listen(mc, seconds: int, data_type: int, show_all: bool = False) -> No
         mc.subscribe(EventType.CHANNEL_DATA_RECV, on_any)
     mc.subscribe(EventType.CHANNEL_DATA_RECV, on_data)
 
-    # The radio does NOT push received datagrams up the serial link. It pushes
-    # MESSAGES_WAITING, and the app must then call get_msg() for each one.
-    # Without this, messages queue on the radio and nothing ever arrives here.
-    await mc.start_auto_message_fetching()
+    # The radio does NOT push received datagrams up the serial link, and it
+    # does not reliably raise MESSAGES_WAITING for them either — in practice
+    # queued datagrams only came down when a chat message triggered a fetch.
+    # So poll: ask for the next message over and over, forever.
+    async def poll_loop() -> None:
+        while True:
+            try:
+                result = await mc.commands.get_msg()
+                etype = getattr(result, "type", None)
+                if etype in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                    await asyncio.sleep(poll)   # queue empty, wait a beat
+                else:
+                    await asyncio.sleep(0.05)   # got one, check for more now
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"  (poll error: {exc})")
+                await asyncio.sleep(poll)
 
-    print(f"listening {seconds}s for data type 0x{data_type:04X}\n")
-    await asyncio.sleep(seconds)
+    task = asyncio.create_task(poll_loop())
+    print(f"listening {seconds}s for data type 0x{data_type:04X} "
+          f"(polling every {poll}s)\n")
+    try:
+        await asyncio.sleep(seconds)
+    finally:
+        task.cancel()
 
     if not received:
         print("\nnothing arrived. Check both radios are on the same channel and "
@@ -156,22 +176,36 @@ async def listen(mc, seconds: int, data_type: int, show_all: bool = False) -> No
         print(f"missing: {missing}")
     if corrupt:
         print(f"corrupt: {corrupt}")
+    else:
+        print("every datagram's bytes arrived exactly as sent")
     print(f"{len(received) / span:.2f} datagrams/s while the sender was running")
+
+    # Everything landing in the first second means it was a queue flush of old
+    # traffic, not a live test — worth saying so rather than letting it look
+    # like a clean result.
+    first_second = sum(1 for s in seqs if received[s] - started < 1.5)
+    if first_second > 1 and first_second == len(received):
+        print("\nNOTE: all of these arrived at once right after connecting, so "
+              "this was the radio's backlog, not a live transfer. Leave this "
+              "running, then send again to see them arrive one by one.")
 
 
 async def send(mc, channel: int, count: int, size: int, gap: float,
-               data_type: int) -> None:
+               data_type: int, start: int = 0) -> None:
     print(f"sending {count} datagrams of {size} bytes on channel {channel}, "
-          f"data type 0x{data_type:04X}, {gap}s apart\n")
+          f"data type 0x{data_type:04X}, {gap}s apart, "
+          f"sequence {start}-{start + count - 1}\n")
     started = time.monotonic()
     failures = 0
     for seq in range(count):
         t0 = time.monotonic()
         try:
+            # The sequence numbers start where --start says, so a second run
+            # is distinguishable from the first run's leftovers in the queue.
             result = await mc.commands.send_channel_data(channel, data_type,
-                                                         make_packet(seq, size))
+                                                         make_packet(start + seq, size))
         except Exception as exc:
-            print(f"  seq {seq:3d}  raised: {exc}")
+            print(f"  seq {start + seq:3d}  raised: {exc}")
             failures += 1
             if failures >= 3:
                 print("\nthree failures in a row — stopping. Run diagnose.py.")
@@ -189,7 +223,7 @@ async def send(mc, channel: int, count: int, size: int, gap: float,
             note = f"  <- {payload!r}"
         else:
             failures = 0
-        print(f"  seq {seq:3d}  {time.monotonic() - t0:5.2f}s  {status}{note}")
+        print(f"  seq {start + seq:3d}  {time.monotonic() - t0:5.2f}s  {status}{note}")
 
         if failures >= 3:
             print("\nthree errors in a row — stopping rather than hammering the "
@@ -220,6 +254,11 @@ async def main() -> None:
                          "(high SF, narrow bandwidth) where airtime is longer")
     ap.add_argument("--data-type", type=lambda s: int(s, 0), default=MOSS_DATA_TYPE,
                     help="application id, e.g. 0xFF01 (same on both ends)")
+    ap.add_argument("--start", type=int, default=0,
+                    help="first sequence number; use a new value each run "
+                         "so old queued datagrams are distinguishable")
+    ap.add_argument("--poll", type=float, default=1.0,
+                    help="how often to ask the radio for queued messages")
     ap.add_argument("--all", action="store_true",
                     help="while listening, dump every datagram event as it "
                          "arrives, before any filtering")
@@ -244,10 +283,10 @@ async def main() -> None:
         if args.channels:
             await list_channels(mc)
         elif args.listen:
-            await listen(mc, args.seconds, args.data_type, args.all)
+            await listen(mc, args.seconds, args.data_type, args.all, args.poll)
         elif args.send:
             await send(mc, args.channel, args.send, args.size, args.gap,
-                       args.data_type)
+                       args.data_type, args.start)
         else:
             print("pass --ports, --channels, --listen, or --send N")
     finally:
