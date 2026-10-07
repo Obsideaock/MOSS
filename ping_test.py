@@ -9,16 +9,16 @@ Serial port names differ by platform:
 
 So start by seeing what's plugged in — you can leave --port off entirely and
 the script picks the port if exactly one radio-ish device is attached:
-    python3 ping_test.py --ports
+    python ping_test.py --ports
 
 FIRST, find your testing channel's slot number on each radio:
-    python3 ping_test.py --channels
+    python ping_test.py --channels
 
 Then, on the receiving machine:
-    python3 ping_test.py --listen
+    python ping_test.py --listen
 
 And on the sending machine (use YOUR testing channel's number):
-    python3 ping_test.py --channel 2 --send 10
+    python ping_test.py --channel 2 --send 10
 
 --channel is required for sending. Slot 0 is normally the Public channel and
 is refused unless you pass --yes-really-public. Channel numbering is per
