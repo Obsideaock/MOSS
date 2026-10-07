@@ -8,9 +8,9 @@ clients ignore it instead of showing "ping 3" to everyone on the channel.
 
 Find your testing channel's slot, then:
 
-    python3 datagram_test.py --listen                       # machine A
-    python3 datagram_test.py --channel 2 --send 10          # machine B
-    python3 datagram_test.py --channel 2 --send 10 --size 163
+    python datagram_test.py --listen                       # machine A
+    python datagram_test.py --channel 1 --send 10          # machine B
+    python datagram_test.py --channel 1 --send 10 --size 163
 
 Datagrams carry at most 163 bytes. This script puts a 4-byte header in front
 (sequence number and payload length) and fills the rest with a known pattern,
