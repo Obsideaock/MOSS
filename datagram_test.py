@@ -8,9 +8,9 @@ clients ignore it instead of showing "ping 3" to everyone on the channel.
 
 Find your testing channel's slot, then:
 
-    python datagram_test.py --listen                       # machine A
-    python datagram_test.py --channel 1 --send 10          # machine B
-    python datagram_test.py --channel 1 --send 10 --size 163
+    python3 datagram_test.py --listen                       # machine A
+    python3 datagram_test.py --channel 2 --send 10          # machine B
+    python3 datagram_test.py --channel 2 --send 10 --size 163
 
 Datagrams carry at most 163 bytes. This script puts a 4-byte header in front
 (sequence number and payload length) and fills the rest with a known pattern,
@@ -91,7 +91,7 @@ async def list_channels(mc, upto: int = 8) -> None:
     print("\nUse the number next to your testing channel as --channel.")
 
 
-async def listen(mc, seconds: int, data_type: int) -> None:
+async def listen(mc, seconds: int, data_type: int, show_all: bool = False) -> None:
     received: dict[int, float] = {}
     corrupt: list[int] = []
     started = time.monotonic()
@@ -99,19 +99,38 @@ async def listen(mc, seconds: int, data_type: int) -> None:
     async def on_data(event) -> None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         dtype = payload.get("data_type")
-        raw = payload.get("data") or payload.get("payload")
+        # The library hands back 'payload' as a HEX STRING, not bytes.
+        raw = payload.get("payload")
+        if isinstance(raw, str):
+            try:
+                raw = bytes.fromhex(raw)
+            except ValueError:
+                print(f"  (undecodable payload: {raw!r})")
+                return
         if dtype is not None and dtype != data_type:
-            return  # somebody else's application, not ours
+            print(f"  (ignored data type 0x{dtype:04X}, ch {payload.get('channel_idx')})")
+            return
         if not isinstance(raw, (bytes, bytearray)) or len(raw) < HEADER:
+            print(f"  (short or unreadable frame: {payload!r})")
             return
         seq, intact = check_packet(bytes(raw))
         received[seq] = time.monotonic()
         flag = "" if intact else "  CORRUPT"
         if not intact:
             corrupt.append(seq)
+        snr = payload.get("SNR")
+        snr_text = f"  SNR {snr}" if snr is not None else ""
+        hops = payload.get("path_len")
+        hop_text = "" if hops in (None, 255) else f"  {hops} hop(s)"
         print(f"  seq {seq:3d}  {len(raw):3d} bytes  "
-              f"t+{received[seq] - started:6.1f}s{flag}")
+              f"t+{received[seq] - started:6.1f}s{snr_text}{hop_text}{flag}")
 
+    async def on_any(event) -> None:
+        if show_all:
+            print(f"  RAW {event.payload!r}")
+
+    if show_all:
+        mc.subscribe(EventType.CHANNEL_DATA_RECV, on_any)
     mc.subscribe(EventType.CHANNEL_DATA_RECV, on_data)
     print(f"listening {seconds}s for data type 0x{data_type:04X}\n")
     await asyncio.sleep(seconds)
@@ -139,12 +158,37 @@ async def send(mc, channel: int, count: int, size: int, gap: float,
     print(f"sending {count} datagrams of {size} bytes on channel {channel}, "
           f"data type 0x{data_type:04X}, {gap}s apart\n")
     started = time.monotonic()
+    failures = 0
     for seq in range(count):
         t0 = time.monotonic()
-        result = await mc.commands.send_channel_data(channel, data_type,
-                                                     make_packet(seq, size))
+        try:
+            result = await mc.commands.send_channel_data(channel, data_type,
+                                                         make_packet(seq, size))
+        except Exception as exc:
+            print(f"  seq {seq:3d}  raised: {exc}")
+            failures += 1
+            if failures >= 3:
+                print("\nthree failures in a row — stopping. Run diagnose.py.")
+                return
+            await asyncio.sleep(gap)
+            continue
+
         status = getattr(result, "type", result)
-        print(f"  seq {seq:3d}  {time.monotonic() - t0:5.2f}s  {status}")
+        payload = getattr(result, "payload", None)
+        note = ""
+        if status == EventType.ERROR:
+            failures += 1
+            # {"reason": "timeout"} means the radio never answered at all,
+            # which is different from the firmware rejecting the command.
+            note = f"  <- {payload!r}"
+        else:
+            failures = 0
+        print(f"  seq {seq:3d}  {time.monotonic() - t0:5.2f}s  {status}{note}")
+
+        if failures >= 3:
+            print("\nthree errors in a row — stopping rather than hammering the "
+                  "radio. Run diagnose.py to see what the firmware says.")
+            return
         await asyncio.sleep(gap)
     elapsed = time.monotonic() - started
     print(f"\n{count} datagrams in {elapsed:.1f}s")
@@ -165,9 +209,14 @@ async def main() -> None:
     ap.add_argument("--size", type=int, default=64,
                     help=f"datagram size in bytes, {HEADER}-{MAX_DATAGRAM}")
     ap.add_argument("--seconds", type=int, default=120)
-    ap.add_argument("--gap", type=float, default=3.0)
+    ap.add_argument("--gap", type=float, default=3.0,
+                    help="seconds between sends; raise it on slow presets "
+                         "(high SF, narrow bandwidth) where airtime is longer")
     ap.add_argument("--data-type", type=lambda s: int(s, 0), default=MOSS_DATA_TYPE,
                     help="application id, e.g. 0xFF01 (same on both ends)")
+    ap.add_argument("--all", action="store_true",
+                    help="while listening, dump every datagram event as it "
+                         "arrives, before any filtering")
     ap.add_argument("--yes-really-public", action="store_true")
     args = ap.parse_args()
 
@@ -185,15 +234,23 @@ async def main() -> None:
     mc = await MeshCore.create_serial(port, args.baud)
     print(f"connected to {port}")
 
-    if args.channels:
-        await list_channels(mc)
-    elif args.listen:
-        await listen(mc, args.seconds, args.data_type)
-    elif args.send:
-        await send(mc, args.channel, args.send, args.size, args.gap, args.data_type)
-    else:
-        print("pass --ports, --channels, --listen, or --send N")
+    try:
+        if args.channels:
+            await list_channels(mc)
+        elif args.listen:
+            await listen(mc, args.seconds, args.data_type, args.all)
+        elif args.send:
+            await send(mc, args.channel, args.send, args.size, args.gap,
+                       args.data_type)
+        else:
+            print("pass --ports, --channels, --listen, or --send N")
+    finally:
+        # Release the serial port, or the next run gets "access is denied".
+        await mc.disconnect()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nstopped")
