@@ -32,6 +32,37 @@ def pick_port() -> str:
     raise SystemExit("\npick one with --port")
 
 
+async def open_radio(port: str, baud: int, attempts: int = 6, debug: bool = False):
+    """Open the port, retrying while Windows finishes releasing it.
+
+    After a previous run exits, the USB-serial driver can hold the handle for
+    a second or two, so an immediate re-run gets "access is denied".
+    """
+    last = None
+    for n in range(1, attempts + 1):
+        try:
+            mc = await MeshCore.create_serial(port, baud, debug=debug)
+            if n > 1:
+                print(f"connected on attempt {n}")
+            return mc
+        except Exception as exc:
+            last = exc
+            text = str(exc).lower()
+            busy = ("access is denied" in text or "permission" in text
+                    or "could not open port" in text or "in use" in text)
+            if not busy:
+                raise
+            print(f"  {port} busy (attempt {n}/{attempts}), waiting...")
+            await asyncio.sleep(1.5)
+    raise SystemExit(
+        f"\n{port} stayed busy. Something else is holding it:\n"
+        "  - another terminal still running one of these scripts\n"
+        "  - a stray python.exe (check Task Manager)\n"
+        "  - the MeshCore desktop or web client connected to the radio\n"
+        f"Last error: {last}"
+    )
+
+
 def dump(label: str, result) -> None:
     """Print an Event's type AND payload — the payload holds the reason."""
     etype = getattr(result, "type", None)
@@ -110,22 +141,30 @@ async def main() -> None:
                             format="%(name)s %(levelname)s %(message)s")
 
     port = args.port or pick_port()
-    mc = await MeshCore.create_serial(port, args.baud, debug=args.debug)
+    mc = await open_radio(port, args.baud, debug=args.debug)
     print(f"connected to {port}")
 
-    await step_device_info(mc)
-    await step_channels(mc)
+    try:
+        await step_device_info(mc)
+        await step_channels(mc)
 
-    if args.channel is not None:
-        if not args.skip_chat:
-            await step_chat_control(mc, args.channel)
-            await asyncio.sleep(5)
-        await step_datagram(mc, args.channel)
-    else:
-        print("\n(pass --channel N to also test sending)")
+        if args.channel is not None:
+            if not args.skip_chat:
+                await step_chat_control(mc, args.channel)
+                await asyncio.sleep(3)
+            await step_datagram(mc, args.channel)
+        else:
+            print("\n(pass --channel N to also test sending)")
+    finally:
+        # Release the serial port, or the next run gets "access is denied".
+        await mc.disconnect()
+        await asyncio.sleep(0.5)  # let the driver release the port
 
     print("\ndone")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nstopped")

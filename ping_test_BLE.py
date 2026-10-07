@@ -62,37 +62,6 @@ def pick_port():
     raise SystemExit("\npick one with --port.")
 
 
-async def open_radio(port: str, baud: int, attempts: int = 6):
-    """Open the port, retrying while Windows finishes releasing it.
-
-    After a previous run exits, the USB-serial driver can hold the handle for
-    a second or two, so an immediate re-run gets "access is denied".
-    """
-    last = None
-    for n in range(1, attempts + 1):
-        try:
-            mc = await MeshCore.create_serial(port, baud)
-            if n > 1:
-                print(f"connected on attempt {n}")
-            return mc
-        except Exception as exc:
-            last = exc
-            text = str(exc).lower()
-            busy = ("access is denied" in text or "permission" in text
-                    or "could not open port" in text or "in use" in text)
-            if not busy:
-                raise
-            print(f"  {port} busy (attempt {n}/{attempts}), waiting...")
-            await asyncio.sleep(1.5)
-    raise SystemExit(
-        f"\n{port} stayed busy. Something else is holding it:\n"
-        "  - another terminal still running one of these scripts\n"
-        "  - a stray python.exe (check Task Manager)\n"
-        "  - the MeshCore desktop or web client connected to the radio\n"
-        f"Last error: {last}"
-    )
-
-
 async def list_channels(mc, upto=8):
     print("channel slots on this radio:\n")
     for idx in range(upto):
@@ -123,10 +92,6 @@ async def listen(mc, seconds):
     mc.subscribe(EventType.CHANNEL_MSG_RECV, on_msg)
     mc.subscribe(EventType.CONTACT_MSG_RECV, on_msg)
 
-    # The radio queues incoming messages and only pushes MESSAGES_WAITING;
-    # this makes the library call get_msg() to actually pull them down.
-    await mc.start_auto_message_fetching()
-
     print(f"listening for {seconds}s...\n")
     await asyncio.sleep(seconds)
     print(f"\ngot {len(seen)} messages")
@@ -141,6 +106,14 @@ async def send(mc, channel, count, gap):
         print(f"  sent {text!r} in {time.time() - start:.2f}s")
         await asyncio.sleep(gap)
     print(f"\nsent {count} messages")
+    
+    
+async def send_message(mc, channel, message):
+    print(f"Sending to channel {channel}...")
+
+    await mc.commands.send_chan_msg(channel, message)
+
+    print(f"Message submitted: {message}")
 
 
 async def main():
@@ -152,6 +125,7 @@ async def main():
     ap.add_argument("--channels", action="store_true", help="list channel slots and exit")
     ap.add_argument("--listen", action="store_true")
     ap.add_argument("--send", type=int, metavar="N")
+    ap.add_argument("--message", type=str, help="Custom message to send") # added this line to send a message
     ap.add_argument("--channel", type=int, help="channel slot to send on")
     ap.add_argument("--seconds", type=int, default=120)
     ap.add_argument("--gap", type=float, default=3.0)
@@ -163,34 +137,36 @@ async def main():
         show_ports()
         return
 
-    if args.send and args.channel is None:
+    if (args.send or args.message is not None) and args.channel is None: # changed this
         raise SystemExit("--channel is required for sending. "
                          "Run with --channels to see the slots on this radio.")
-    if args.send and args.channel == 0 and not args.yes_really_public:
+    if (args.send or args.message is not None) and args.channel == 0 and not args.yes_really_public: # changed this 
         raise SystemExit("Slot 0 is normally the Public channel. Pick your testing "
                          "channel's slot, or pass --yes-really-public if you mean it.")
 
-    port = args.port or pick_port()
-    mc = await open_radio(port, args.baud)
-    print(f"connected to {port}")
+    print("Connecting to MeshCore through Bluetooth...")
 
-    try:
-        if args.channels:
-            await list_channels(mc)
-        elif args.listen:
-            await listen(mc, args.seconds)
-        elif args.send:
-            await send(mc, args.channel, args.send, args.gap)
-        else:
-            print("pass --channels, --listen, or --send N")
-    finally:
-        # Release the serial port, or the next run gets "access is denied".
-        await mc.disconnect()
-        await asyncio.sleep(0.5)  # let the driver release the port
+    mc = await MeshCore.create_ble(
+    address="F4:FC:95:F3:2C:FE"
+    )
+
+    print("Connected to MeshCore-Cameron!")
+    # updated this as well 155 - 168
+    if args.channels:
+        await list_channels(mc)
+
+    elif args.listen:
+        await listen(mc, args.seconds)
+
+    elif args.message is not None:
+        await send_message(mc, args.channel, args.message)
+
+    elif args.send:
+        await send(mc, args.channel, args.send, args.gap)
+
+    else:
+        print("pass --channels, --listen, --send N, or --message")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nstopped")
+    asyncio.run(main())

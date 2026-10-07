@@ -74,6 +74,37 @@ def pick_port() -> str:
     raise SystemExit("\npick one with --port.")
 
 
+async def open_radio(port: str, baud: int, attempts: int = 6):
+    """Open the port, retrying while Windows finishes releasing it.
+
+    After a previous run exits, the USB-serial driver can hold the handle for
+    a second or two, so an immediate re-run gets "access is denied".
+    """
+    last = None
+    for n in range(1, attempts + 1):
+        try:
+            mc = await MeshCore.create_serial(port, baud)
+            if n > 1:
+                print(f"connected on attempt {n}")
+            return mc
+        except Exception as exc:
+            last = exc
+            text = str(exc).lower()
+            busy = ("access is denied" in text or "permission" in text
+                    or "could not open port" in text or "in use" in text)
+            if not busy:
+                raise
+            print(f"  {port} busy (attempt {n}/{attempts}), waiting...")
+            await asyncio.sleep(1.5)
+    raise SystemExit(
+        f"\n{port} stayed busy. Something else is holding it:\n"
+        "  - another terminal still running one of these scripts\n"
+        "  - a stray python.exe (check Task Manager)\n"
+        "  - the MeshCore desktop or web client connected to the radio\n"
+        f"Last error: {last}"
+    )
+
+
 async def list_channels(mc, upto: int = 8) -> None:
     print("channel slots on this radio:\n")
     for idx in range(upto):
@@ -276,7 +307,7 @@ async def main() -> None:
                          "channel's slot, or pass --yes-really-public if you mean it.")
 
     port = args.port or pick_port()
-    mc = await MeshCore.create_serial(port, args.baud)
+    mc = await open_radio(port, args.baud)
     print(f"connected to {port}")
 
     try:
@@ -292,6 +323,7 @@ async def main() -> None:
     finally:
         # Release the serial port, or the next run gets "access is denied".
         await mc.disconnect()
+        await asyncio.sleep(0.5)  # let the driver release the port
 
 
 if __name__ == "__main__":
