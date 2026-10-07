@@ -132,6 +132,12 @@ async def listen(mc, seconds: int, data_type: int, show_all: bool = False) -> No
     if show_all:
         mc.subscribe(EventType.CHANNEL_DATA_RECV, on_any)
     mc.subscribe(EventType.CHANNEL_DATA_RECV, on_data)
+
+    # The radio does NOT push received datagrams up the serial link. It pushes
+    # MESSAGES_WAITING, and the app must then call get_msg() for each one.
+    # Without this, messages queue on the radio and nothing ever arrives here.
+    await mc.start_auto_message_fetching()
+
     print(f"listening {seconds}s for data type 0x{data_type:04X}\n")
     await asyncio.sleep(seconds)
 
