@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# PyCharm per-user state
+.idea/workspace.xml
+
+# MOSS leftovers
+*.moss-partial
+received/
+
+# Wikipedia libraries are far too big for git
+*.zim
+!TestExamples/mini_wikipedia.zim

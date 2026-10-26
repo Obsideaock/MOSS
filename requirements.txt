@@ -1,0 +1,8 @@
+# Laptop (client) and everything shared.
+#   pip install -r requirements.txt
+meshcore==2.3.15
+pyserial>=3.5
+# Encryption (MeshCore already pulls this in; the tested minimum)
+pycryptodome>=3.24
+# For trying it without radios: `python -m moss web --sim some.zim`
+libzim>=3.6

@@ -1,0 +1,3 @@
+# Gateway (the Pi with the radio and the .zim file).
+#   pip install -r requirements-gateway.txt
+-r requirements.txt

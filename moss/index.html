@@ -1,0 +1,979 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>moss reader</title>
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+<script defer src="/static/katex/katex.min.js"></script>
+<script>
+/* Dark by default, whatever the system says; the ribbon toggle remembers a change.
+   Set before first paint so there is no flash. */
+(function () {
+  var t = null;
+  try { t = localStorage.getItem("moss-theme"); } catch (e) {}
+  document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
+})();
+</script>
+<style>
+/* ------------------------------------------------------------------
+   Tokens. Greys, accent and named colours are Obsidian's documented
+   default-theme values (docs.obsidian.md, CSS variables > Colors).
+------------------------------------------------------------------- */
+:root {
+  --accent-h: 258; --accent-s: 88%; --accent-l: 66%;
+  --color-accent: hsl(var(--accent-h), var(--accent-s), var(--accent-l));
+  --color-accent-1: hsl(calc(var(--accent-h) - 3), calc(var(--accent-s) * 1.02), calc(var(--accent-l) + 2.5%));
+  --color-accent-2: hsl(calc(var(--accent-h) - 5), var(--accent-s), calc(var(--accent-l) + 5%));
+
+  --base-00: #1c1c1c; --base-05: #212121; --base-10: #232323; --base-20: #282828;
+  --base-25: #2e2e2e; --base-30: #333333; --base-35: #3f3f3f; --base-40: #555555;
+  --base-50: #666666; --base-60: #999999; --base-70: #b3b3b3; --base-100: #dadada;
+
+  --red: #fb464c; --orange: #e9973f; --yellow: #e0de71; --green: #44cf6e;
+  --cyan: #53dfdd; --blue: #027aff; --purple: #a882ff; --pink: #fa99cd;
+
+  --bg: var(--base-00);            /* background-primary */
+  --bg-alt: var(--base-10);        /* background-primary-alt */
+  --bg-2: var(--base-20);          /* background-secondary: sidebars, tab bar */
+  --border: var(--base-30);
+  --field: var(--base-25);
+  --text: var(--base-100);
+  --muted: var(--base-70);
+  --faint: var(--base-50);
+  --text-accent: var(--color-accent-1);
+  --on-accent: #fff;
+  --hover: color-mix(in srgb, var(--base-100) 7.5%, transparent);
+  --active: color-mix(in srgb, var(--base-100) 11%, transparent);
+
+  --font-ui: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace;
+  --radius-s: 4px; --radius-m: 8px; --radius-l: 10px;
+  --file-width: 700px;
+  --ribbon-w: 44px; --left-w: 264px; --right-w: 248px;
+}
+:root[data-theme="light"] {
+  --base-00: #ffffff; --base-05: #fcfcfc; --base-10: #fafafa; --base-20: #f6f6f6;
+  --base-25: #efefef; --base-30: #e4e4e4; --base-35: #dadada; --base-40: #bdbdbd;
+  --base-50: #ababab; --base-60: #707070; --base-70: #5c5c5c; --base-100: #222222;
+  --red: #e93147; --orange: #ec7500; --yellow: #e0ac00; --green: #08b94e;
+  --cyan: #00bfbc; --blue: #086ddd; --purple: #7852ee; --pink: #d53984;
+  --text-accent: hsl(var(--accent-h), var(--accent-s), 52%);
+  --hover: color-mix(in srgb, var(--base-100) 6%, transparent);
+  --active: color-mix(in srgb, var(--base-100) 9%, transparent);
+}
+
+* { box-sizing: border-box; }
+html { height: 100%; }
+body {
+  margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: 16px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: 0; padding: 0; }
+a { color: var(--text-accent); }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.icon { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.icon.s { width: 14px; height: 14px; }
+
+/* ---------------- frame ---------------- */
+.app {
+  display: grid; height: 100vh; height: 100dvh;
+  grid-template-columns: var(--ribbon-w) var(--left-w) minmax(0, 1fr) var(--right-w);
+  grid-template-rows: minmax(0, 1fr) 24px;
+}
+.app.no-left { --left-w: 0px; }
+.app.no-right { --right-w: 0px; }
+.app.no-left .left, .app.no-right .right { display: none; }
+
+.ribbon {
+  background: var(--bg-2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 0;
+}
+.ribbon .grow { flex: 1; }
+.rbtn {
+  width: 32px; height: 32px; border-radius: var(--radius-s); color: var(--faint);
+  display: grid; place-items: center;
+}
+.rbtn:hover { background: var(--hover); color: var(--muted); }
+.rbtn[aria-pressed="true"] { color: var(--muted); }
+
+/* sidebars */
+.left, .right { background: var(--bg-2); min-width: 0; overflow-y: auto; }
+.left { border-right: 1px solid var(--border); }
+.right { border-left: 1px solid var(--border); padding: 12px 8px; }
+
+.search-box { position: relative; margin: 10px 10px 6px; }
+.search-box input {
+  width: 100%; height: 30px; padding: 0 10px 0 30px; border-radius: var(--radius-s);
+  background: var(--field); border: 1px solid var(--border); font-size: 13px;
+}
+.search-box input::placeholder { color: var(--faint); }
+.search-box input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-box input:focus-visible { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 35%, transparent); }
+.search-box button { position: absolute; left: 4px; top: 3px; width: 24px; height: 24px; display: grid; place-items: center; color: var(--faint); border-radius: var(--radius-s); }
+.search-box button:hover { color: var(--text); }
+.search-box button:disabled { opacity: .5; cursor: default; }
+
+.tree { padding: 4px 6px 16px; }
+.tree-item-self {
+  display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 2px 6px;
+  border-radius: var(--radius-s); color: var(--muted); font-size: 13px; width: 100%; text-align: left;
+}
+.tree-item-self:hover { background: var(--hover); color: var(--text); }
+.tree-item-self.is-active { background: var(--active); color: var(--text); }
+.tree-item-self .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-item-self .count { color: var(--faint); font-size: 11px; }
+.folder .chev { transition: transform .12s; color: var(--faint); }
+.folder.collapsed .chev { transform: rotate(-90deg); }
+.folder.collapsed .children { display: none; }
+.children { margin-left: 13px; padding-left: 4px; border-left: 1px solid var(--border); }
+.file { display: flex; align-items: center; border-radius: var(--radius-s); }
+.file .tree-item-self { flex: 1; min-width: 0; }
+.file .drop { width: 22px; height: 22px; margin-right: 2px; border-radius: var(--radius-s); color: var(--faint); display: grid; place-items: center; opacity: 0; }
+.file:hover .drop, .file .drop:focus-visible { opacity: 1; }
+.file .drop:hover { color: var(--red); background: var(--hover); }
+.tree .empty { color: var(--faint); font-size: 12px; padding: 6px 8px; }
+
+.side-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); padding: 4px 6px 6px; }
+.right .tree-item-self { font-size: 12.5px; }
+.right .sub { margin-bottom: 16px; }
+.right .indent { padding-left: 20px; }
+.right .none { color: var(--faint); font-size: 12px; padding: 2px 8px; }
+
+/* centre */
+.center { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+.tab-bar { background: var(--bg-2); border-bottom: 1px solid var(--border); height: 36px; display: flex; align-items: flex-end; padding: 0 8px; gap: 2px; flex: none; }
+.tab {
+  display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px 0 12px; max-width: 260px; min-width: 0;
+  background: var(--bg); color: var(--text); font-size: 13px;
+  border: 1px solid var(--border); border-bottom: 0; border-radius: var(--radius-m) var(--radius-m) 0 0;
+  position: relative; top: 1px;
+}
+.tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-close { width: 20px; height: 20px; border-radius: var(--radius-s); display: grid; place-items: center; color: var(--faint); }
+.tab-close:hover { background: var(--hover); color: var(--text); }
+
+.view-header { height: 40px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px; }
+.view-header .crumb { flex: 1; min-width: 0; text-align: center; font-size: 13px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-header .crumb b { color: var(--muted); font-weight: 500; }
+.view-header .actions { display: flex; gap: 2px; min-width: 32px; justify-content: flex-end; }
+.cbtn { width: 28px; height: 28px; border-radius: var(--radius-s); color: var(--faint); display: grid; place-items: center; }
+.cbtn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.cbtn:disabled { opacity: .35; cursor: default; }
+
+.scroller { flex: 1; min-height: 0; overflow-y: auto; }
+.content { max-width: calc(var(--file-width) + 64px); margin: 0 auto; padding: 8px 32px 140px; }
+
+.status { grid-column: 1 / -1; background: var(--bg-2); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: flex-end; gap: 16px; padding: 0 10px; font-size: 12px; color: var(--muted); }
+.status .item { display: flex; align-items: center; gap: 5px; }
+.status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.status .sim .dot { background: var(--orange); }
+.status .down .dot { background: var(--red); animation: pulse-dot 1.2s ease-in-out infinite; }
+.status .down { color: var(--text); }
+.status .lock { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; color: var(--green); }
+@keyframes pulse-dot { 50% { opacity: .35; } }
+
+/* ---------------- reading view ---------------- */
+.markdown-reading-view { font-size: 16px; line-height: 1.5; }
+.inline-title { font-size: 1.802em; font-weight: 700; line-height: 1.2; margin: 8px 0 14px; }
+.markdown-reading-view h1, .markdown-reading-view h2, .markdown-reading-view h3, .markdown-reading-view h4 { line-height: 1.2; margin: 1.6em 0 .4em; }
+.markdown-reading-view h1 { font-size: 1.802em; font-weight: 700; }
+.markdown-reading-view h2 { font-size: 1.602em; font-weight: 600; }
+.markdown-reading-view h3 { font-size: 1.424em; font-weight: 600; }
+.markdown-reading-view h4 { font-size: 1.266em; font-weight: 600; }
+.markdown-reading-view p { margin: 0 0 1rem; }
+.markdown-reading-view .internal-link { text-decoration: none; cursor: pointer; background: none; border: 0; font: inherit; color: var(--text-accent); padding: 0; }
+.markdown-reading-view .internal-link:hover { text-decoration: underline; }
+.markdown-reading-view .internal-link.is-unresolved { opacity: .7; text-decoration: underline dotted; text-underline-offset: 3px; }
+.markdown-reading-view .internal-link.is-later { opacity: 1; text-decoration: underline; text-decoration-color: var(--orange); }
+.markdown-reading-view h5, .markdown-reading-view h6 { font-size: 1.1em; font-weight: 600; line-height: 1.2; margin: 1.4em 0 .4em; }
+.markdown-reading-view ul { margin: 0 0 1rem; padding-left: 1.4em; }
+.markdown-reading-view li { margin: 0 0 .25rem; }
+.markdown-reading-view .math-display { margin: 0 0 1rem; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.markdown-reading-view .katex { font-size: 1.08em; }
+.markdown-reading-view code.tex { font-size: .9em; background: var(--field); padding: 1px 4px; border-radius: 4px; }
+.markdown-reading-view ol { margin: 0 0 1rem; padding-left: 1.8em; }
+.markdown-reading-view p.hatnote { color: var(--muted); font-size: .94em; margin: -.2rem 0 .8rem; padding-left: 1.2em; }
+.markdown-reading-view strong { font-weight: 650; }
+.table-wrap { overflow-x: auto; margin: 0 0 1.2rem; }
+.markdown-reading-view table { border-collapse: collapse; font-size: 14px; line-height: 1.4; }
+.markdown-reading-view th, .markdown-reading-view td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.markdown-reading-view thead th, .markdown-reading-view tr.head th { background: var(--bg-alt); font-weight: 600; }
+.markdown-reading-view caption { caption-side: top; text-align: left; font-weight: 600; padding: 0 0 6px; color: var(--muted); }
+.facts { float: right; clear: right; width: min(300px, 46%); margin: 0 0 1rem 1.4rem; border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--bg-alt); font-size: 13.5px; }
+.facts > summary { list-style: none; cursor: pointer; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; align-items: center; }
+.facts > summary::-webkit-details-marker { display: none; }
+.facts:not([open]) > summary { border-bottom: 0; }
+.facts:not([open]) > summary .icon { transform: rotate(-90deg); }
+.facts .table-wrap { margin: 0; max-height: 70vh; overflow-y: auto; }
+.facts table { width: 100%; font-size: 13px; }
+.facts th, .facts td { border: 0; border-top: 1px solid var(--border); padding: 4px 10px; }
+.facts tr:first-child > * { border-top: 0; }
+.facts tbody th { color: var(--muted); font-weight: 500; width: 40%; }
+.facts tr.head th { background: color-mix(in srgb, var(--color-accent) 10%, transparent); color: var(--text); text-align: center; font-weight: 600; }
+.markdown-reading-view h2, .markdown-reading-view h3 { clear: right; }
+@media (max-width: 720px) { .facts { float: none; width: auto; margin: 0 0 1rem; } }
+.link-menu { position: absolute; z-index: 50; min-width: 220px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: 0 8px 24px rgba(0,0,0,.28); padding: 6px; font-size: 14px; }
+.link-menu .title { font-weight: 600; padding: 4px 8px 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px; overflow-wrap: anywhere; }
+.link-menu button { display: block; width: 100%; text-align: left; padding: 6px 8px; border-radius: var(--radius-s); color: var(--text); }
+.link-menu button:hover, .link-menu button:focus-visible { background: var(--hover); }
+.link-menu button small { display: block; color: var(--faint); font-size: 12px; }
+.markdown-reading-view .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--color-accent); vertical-align: text-bottom; margin-left: 2px; animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* properties */
+.properties { margin: 0 0 18px; border-bottom: 1px solid var(--border); padding-bottom: 14px; }
+.properties summary { list-style: none; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; padding: 2px 0 6px; }
+.properties summary::-webkit-details-marker { display: none; }
+.properties summary .icon { transition: transform .12s; }
+.properties:not([open]) summary .icon { transform: rotate(-90deg); }
+.prop { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: center; min-height: 30px; font-size: 14px; }
+.prop .key { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.prop .val { color: var(--text); overflow-wrap: anywhere; }
+.prop .val a { text-decoration: none; }
+.prop .val a:hover { text-decoration: underline; }
+.tag { display: inline-block; font-size: 12.5px; line-height: 1.3; padding: 1px 8px; margin-right: 6px; border-radius: 2em; color: var(--text-accent); background: color-mix(in srgb, var(--color-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent); }
+
+/* callouts */
+.callout { --c: var(--blue); margin: 1rem 0; padding: 12px 12px 12px 24px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--c) 10%, transparent); }
+.callout[data-callout="example"] { --c: var(--purple); }
+.callout[data-callout="failure"] { --c: var(--red); }
+.callout-title { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--c); }
+.callout-content { margin-top: 6px; }
+.callout-content > :last-child { margin-bottom: 0; }
+
+/* waiting: the minute is spent here */
+.say { font-size: 1.15em; font-weight: 500; margin: 0 0 2px; }
+.sub { color: var(--muted); font-size: 14px; margin: 0 0 12px; min-height: 1.5em; font-variant-numeric: tabular-nums; }
+.steps { display: flex; flex-wrap: wrap; gap: 4px 18px; list-style: none; padding: 0; margin: 0 0 14px; font-size: 13px; color: var(--faint); }
+.steps li::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; border: 1.5px solid var(--base-40); }
+.steps li.done { color: var(--muted); }
+.steps li.done::before { background: var(--color-accent); border-color: var(--color-accent); }
+.steps li.now { color: var(--text); font-weight: 600; }
+.steps li.now::before { border-color: var(--orange); background: var(--orange); }
+.map { display: grid; grid-template-columns: repeat(auto-fill, 12px); gap: 4px; }
+.map.idle { grid-template-columns: repeat(34, 12px); overflow: hidden; }
+.cell { width: 12px; height: 12px; border-radius: 2px; border: 1.5px solid var(--base-40); }
+.cell.got { background: var(--color-accent); border-color: var(--color-accent); }
+.cell.new { animation: land .5s ease-out; }
+.cell.lost { border-color: var(--orange); animation: pulse 1.3s ease-in-out infinite; }
+@keyframes land { from { transform: scale(1.9); background: var(--orange); border-color: var(--orange); } to { transform: scale(1); } }
+@keyframes pulse { 50% { background: color-mix(in srgb, var(--orange) 45%, transparent); } }
+.map.idle .cell { animation: sweep 2.4s ease-in-out infinite; animation-delay: calc(var(--i) * 55ms); }
+@keyframes sweep { 0%, 70%, 100% { background: transparent; } 35% { background: color-mix(in srgb, var(--color-accent) 60%, transparent); } }
+
+/* search results */
+.search-info { color: var(--muted); font-size: 13px; margin: 6px 0 12px; display: flex; align-items: center; gap: 10px; }
+.search-result { display: block; width: 100%; text-align: left; border-radius: var(--radius-m); padding: 8px 10px; margin-bottom: 4px; background: var(--bg-alt); border: 1px solid transparent; }
+.search-result:hover { background: var(--hover); border-color: var(--border); }
+.search-result .t { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
+.search-result .t .saved { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--text-accent); }
+.search-result .m { margin: 4px 0 0 22px; padding-left: 10px; border-left: 2px solid var(--border); color: var(--muted); font-size: 13.5px; }
+
+/* empty state */
+.empty-state { text-align: center; padding: 14vh 0 0; }
+.empty-state-title { color: var(--muted); font-size: 15px; margin-bottom: 14px; }
+.empty-state-action { display: block; margin: 0 auto 4px; color: var(--text-accent); font-size: 15px; padding: 2px 8px; border-radius: var(--radius-s); }
+.empty-state-action:hover { text-decoration: underline; }
+.empty-state-action small { color: var(--faint); margin-left: 8px; font-size: 12px; }
+.empty-state-note { color: var(--faint); font-size: 13px; max-width: 30rem; margin: 22px auto 0; }
+
+.btn { background: var(--color-accent); color: var(--on-accent); padding: 5px 12px; border-radius: var(--radius-s); font-size: 13px; font-weight: 500; }
+.btn:hover { background: var(--color-accent-2); }
+.btn.quiet { background: var(--field); color: var(--text); border: 1px solid var(--border); }
+.btn.quiet:hover { background: var(--hover); }
+.row-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+/* ---------------- narrow screens ---------------- */
+@media (max-width: 960px) { .app { --right-w: 0px; } .app .right { display: none; } }
+@media (max-width: 720px) {
+  .app { display: flex; flex-direction: column; height: auto; min-height: 100dvh; }
+  .ribbon, .tab-bar, .right { display: none; }
+  .left { max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  .app.no-left .left { display: none; }
+  .center { flex: 1 1 auto; }
+  .scroller { overflow: visible; flex: 1 1 auto; }
+  .content { padding: 8px 18px 80px; }
+  .prop { grid-template-columns: 96px minmax(0, 1fr); }
+  .status { height: 24px; position: sticky; bottom: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cell, .map.idle .cell, .caret { animation: none !important; }
+  .folder .chev, .properties summary .icon { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <nav class="ribbon" aria-label="Ribbon">
+    <button class="rbtn" id="rb-files" aria-pressed="true" title="Saved notes" aria-label="Toggle saved notes"><span data-icon="panel-left"></span></button>
+    <button class="rbtn" id="rb-search" title="Search over radio (Ctrl K)" aria-label="Search over radio"><span data-icon="search"></span></button>
+    <button class="rbtn" id="rb-outline" aria-pressed="true" title="Outline" aria-label="Toggle outline"><span data-icon="panel-right"></span></button>
+    <span class="grow"></span>
+    <button class="rbtn" id="rb-theme" title="Switch light or dark theme" aria-label="Switch light or dark theme"><span data-icon="sun"></span></button>
+  </nav>
+
+  <aside class="left" id="left" aria-label="Saved notes">
+    <form class="search-box" id="find" role="search">
+      <button type="submit" id="go" aria-label="Search over radio"><span data-icon="search" data-size="s"></span></button>
+      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search over radio…" aria-label="Search over radio">
+    </form>
+    <div class="tree" id="tree"></div>
+  </aside>
+
+  <main class="center">
+    <div class="tab-bar">
+      <div class="tab" id="tab"><span data-icon="file" data-size="s"></span><span class="label" id="tab-title">New tab</span>
+        <button class="tab-close" id="tab-close" aria-label="Close tab"><span data-icon="x" data-size="s"></span></button></div>
+    </div>
+    <div class="view-header">
+      <button class="cbtn" id="back" aria-label="Back to results" title="Back to results" disabled><span data-icon="arrow-left"></span></button>
+      <div class="crumb" id="crumb"></div>
+      <div class="actions" id="actions"></div>
+    </div>
+    <div class="scroller" id="scroller"><div class="content" id="main"></div></div>
+  </main>
+
+  <aside class="right" id="right" aria-label="Outline">
+    <div class="sub">
+      <div class="side-title"><span data-icon="list" data-size="s"></span>Outline</div>
+      <div id="outline"></div>
+    </div>
+    <div class="sub">
+      <div class="side-title"><span data-icon="link" data-size="s"></span>Links to saved notes</div>
+      <div id="links"></div>
+    </div>
+  </aside>
+
+  <footer class="status">
+    <span class="item" id="stat"></span>
+    <span class="item" id="link"><span class="dot"></span><span>connecting…</span></span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const main = $("#main"), qInput = $("#q"), goBtn = $("#go"), appEl = $("#app");
+
+/* ---------- icons (Lucide, ISC licence) ---------- */
+const ICONS = {
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  alert: '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+  radio: '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  list: '<path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M3 6h.01"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M8 6h13"/>',
+  lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  "panel-left": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>',
+  "panel-right": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  tag: '<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5"/>',
+  calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
+  scale: '<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
+};
+const NS = "http://www.w3.org/2000/svg";
+function svg(name, size) {
+  const s = document.createElementNS(NS, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "icon" + (size === "s" ? " s" : ""));
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = ICONS[name] || "";
+  return s;
+}
+document.querySelectorAll("[data-icon]").forEach((el) => el.replaceWith(svg(el.dataset.icon, el.dataset.size)));
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  }
+  return el;
+}
+async function api(path, method = "GET", body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+const app = { cached: [], lastResults: null, timer: null, view: "home", current: null, folderOpen: true,
+              later: [], laterOpen: true };
+const savedSet = () => new Set(app.cached.map((a) => a.title.toLowerCase()));
+
+/* ---------- formatters ---------- */
+function secs(n) {
+  n = Math.max(0, Math.round(n));
+  return n < 60 ? `${n} s` : `${Math.floor(n / 60)} min ${String(n % 60).padStart(2, "0")} s`;
+}
+function ago(ts) {
+  const d = Date.now() / 1000 - ts;
+  if (d < 90) return "just now";
+  if (d < 3600) return `${Math.round(d / 60)} min ago`;
+  if (d < 86400) return `${Math.round(d / 3600)} h ago`;
+  return `${Math.round(d / 86400)} days ago`;
+}
+function kb(bytes) { return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
+function day(ts) { const d = new Date(ts * 1000); return d.toISOString().slice(0, 10); }
+
+/* ---------- reading text: a deliberately small markdown subset ---------- */
+const SOURCE = /^\*Source:\s*Wikipedia,\s*(\S+?)\s*[—-]+\s*text under (.+?)\.(?=\s|\*)/;
+
+/* Formulas: KaTeX is bundled with the reader (no internet needed). If it
+   hasn't loaded, show the LaTeX source rather than nothing. */
+function mathEl(tex, display) {
+  const el = h(display ? "div" : "span", { class: display ? "math-display" : "math-inline" });
+  if (window.katex) {
+    try { window.katex.render(tex, el, { displayMode: display, throwOnError: false, output: "htmlAndMathml" }); return el; }
+    catch (e) { /* fall through to the source */ }
+  }
+  el.append(h("code", { class: "tex" }, tex));
+  return el;
+}
+
+/* Read later: titles you met in a link and want next. Kept in this browser. */
+function laterGet() {
+  try { const v = JSON.parse(localStorage.getItem("moss-read-later") || "[]"); if (Array.isArray(v)) app.later = v; }
+  catch (e) { /* storage off: keep the in-memory list */ }
+  return app.later;
+}
+function laterSet(list) {
+  app.later = list;
+  try { localStorage.setItem("moss-read-later", JSON.stringify(list)); } catch (e) { /* fine */ }
+  renderTree();
+}
+const laterHas = (t) => laterGet().some((x) => x.toLowerCase() === t.toLowerCase());
+function laterToggle(t) {
+  laterSet(laterHas(t) ? laterGet().filter((x) => x.toLowerCase() !== t.toLowerCase()) : [...laterGet(), t]);
+}
+
+function closeLinkMenu() { const m = $("#link-menu"); if (m) m.remove(); }
+function linkMenu(anchor, title) {
+  closeLinkMenu();
+  const later = laterHas(title);
+  const menu = h("div", { class: "link-menu", id: "link-menu", role: "menu" },
+    h("div", { class: "title" }, title),
+    h("button", { role: "menuitem", onclick: () => { closeLinkMenu(); openArticle(title); } },
+      "Get it now", h("small", {}, "Request it over the radio")),
+    h("button", { role: "menuitem", onclick: () => {
+        closeLinkMenu(); laterToggle(title);
+        document.querySelectorAll(".internal-link.is-unresolved").forEach((el) => {
+          if (el.dataset.target && el.dataset.target.toLowerCase() === title.toLowerCase()) el.classList.toggle("is-later", !later);
+        });
+      } },
+      later ? "Remove from Read later" : "Read later", h("small", {}, later ? "Take it off the list" : "Add it to the list in the sidebar")));
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const left = Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - menu.offsetWidth - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${r.bottom + window.scrollY + 4}px`;
+  menu.querySelector("button").focus();
+}
+document.addEventListener("click", (e) => {
+  const m = $("#link-menu");
+  if (m && !m.contains(e.target) && !e.target.closest(".internal-link")) closeLinkMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLinkMenu(); });
+
+function wikiLink(inner, ctx) {
+  const bar = inner.indexOf("|");
+  const target = (bar < 0 ? inner : inner.slice(0, bar)).trim();
+  const text = bar < 0 ? inner : inner.slice(bar + 1);
+  const saved = ctx.saved.has(target.toLowerCase());
+  if (saved) ctx.linked.add(app.cached.find((a) => a.title.toLowerCase() === target.toLowerCase()).title);
+  const cls = "internal-link" + (saved ? "" : " is-unresolved" + (laterHas(target) ? " is-later" : ""));
+  return h("button", { class: cls, type: "button", "data-target": target,
+    title: saved ? `${target} (saved)` : `${target}: not saved yet`,
+    onclick: (e) => { e.stopPropagation(); saved ? openArticle(target) : linkMenu(e.currentTarget, target); } }, text);
+}
+
+/* [[link]] | $math$ | **bold** | *italic* -- \$ and \* are literal characters. */
+const INLINE = /(\[\[[^\[\]]+\]\])|((?<!\\)\$(?!\s)(?:\\.|[^\\$])+?(?<!\s)\$)|((?<!\\)\*\*(?![\s*])(?:\\.|[^\\*])+?(?<![\s\\])\*\*)|((?<![\\*])\*(?![\s*])(?:\\.|\[\[[^\]]*\]\]|[^\\*])+?(?<![\s\\])\*)/g;
+const unescape = (s) => s.replace(/\\([$*])/g, "$1");
+function inline(text, ctx = { saved: new Set(), linked: new Set() }) {
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(INLINE)) {
+    if (m.index > last) out.push(unescape(text.slice(last, m.index)));
+    if (m[1]) out.push(wikiLink(m[1].slice(2, -2), ctx));
+    else if (m[2]) out.push(mathEl(m[2].slice(1, -1), false));
+    else if (m[3]) out.push(h("strong", {}, inline(m[3].slice(2, -2), ctx)));
+    else out.push(h("em", {}, inline(m[4].slice(1, -1), ctx)));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(unescape(text.slice(last)));
+  return out;
+}
+
+/* ---------- tables, sent "disassembled" (see moss/tables.py) ----------
+   One row per line, cells split by tabs; ^ = merged with the cell above,
+   < = merged with the cell to the left, a leading ! = header row. */
+function parseTable(lines) {
+  const rows = [];
+  for (let line of lines) {
+    const head = line.startsWith("!");
+    if (head || line.startsWith("\\!")) line = line.slice(1);
+    const row = [];
+    line.split("\t").forEach((raw, c) => {
+      if (raw === "^" && rows.length && c < rows[rows.length - 1].length) {
+        const above = rows[rows.length - 1][c], origin = above.origin || above;
+        const left = row[row.length - 1];
+        if (!left || (left.origin || left) !== origin) origin.rowspan += 1;
+        row.push({ hidden: true, origin });
+      } else if (raw === "<" && row.length) {
+        const prev = row[row.length - 1], origin = prev.origin || prev;
+        if (row.includes(origin)) origin.colspan += 1;
+        row.push({ hidden: true, origin });
+      } else {
+        row.push({ text: raw === "\\^" || raw === "\\<" ? raw.slice(1) : raw, head, rowspan: 1, colspan: 1 });
+      }
+    });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function tableEl(kind, caption, lines, ctx) {
+  const rows = parseTable(lines);
+  // A short row (one cell in a two-column infobox) stretches to the full width.
+  const width = Math.max(...rows.map((r) => r.length));
+  rows.forEach((r) => {
+    const last = [...r].reverse().find((c) => !c.hidden);
+    if (last && r.length < width && !r.some((c) => c.hidden && c.origin !== last)) last.colspan += width - r.length;
+  });
+  const body = h("tbody");
+  rows.forEach((row, r) => {
+    const allHead = row.every((c) => c.hidden || c.head);
+    const tr = h("tr", { class: allHead ? "head" : null });
+    row.forEach((c, i) => {
+      if (c.hidden) return;
+      // Infobox labels (first of two cells) read as headings for their row.
+      const isHead = c.head || (kind === "facts" && i === 0 && row.length > 1 && !allHead &&
+        row.slice(1).some((x) => !x.hidden));
+      tr.append(h(isHead ? "th" : "td", {
+        rowspan: c.rowspan > 1 ? c.rowspan : null, colspan: c.colspan > 1 ? c.colspan : null,
+        scope: isHead && !allHead ? "row" : null }, inline(c.text, ctx)));
+    });
+    body.append(tr);
+  });
+  const table = h("table", {}, kind === "table" && caption ? h("caption", {}, inline(caption, ctx)) : null, body);
+  const wrap = h("div", { class: "table-wrap" }, table);
+  if (kind !== "facts") return wrap;
+  return h("details", { class: "facts", open: "" }, h("summary", {}, svg("chevron", "s"), "Key facts"), wrap);
+}
+
+/* First mention of each saved title becomes an internal link. */
+function linkify(parts, titles, linked) {
+  for (const title of titles) {
+    if (linked.has(title)) continue;
+    const re = new RegExp("(?<![\\w])" + title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\w])");
+    for (let i = 0; i < parts.length; i++) {
+      if (typeof parts[i] !== "string") continue;
+      const m = re.exec(parts[i]);
+      if (!m) continue;
+      const link = h("button", { class: "internal-link", type: "button", onclick: () => openArticle(title) }, m[0]);
+      parts.splice(i, 1, parts[i].slice(0, m.index), link, parts[i].slice(m.index + m[0].length));
+      linked.add(title);
+      break;
+    }
+  }
+  return parts;
+}
+
+function callout(kind, title, iconName, ...body) {
+  return h("div", { class: "callout", "data-callout": kind },
+    h("div", { class: "callout-title" }, svg(iconName), h("span", {}, title)),
+    body.length ? h("div", { class: "callout-content" }, body) : null);
+}
+
+function renderText(md, { caret = false, withTitle = true, titles = [] } = {}) {
+  const box = h("div", { class: "markdown-reading-view" });
+  const linked = new Set();
+  const ctx = { saved: savedSet(), linked };
+  let para = [];
+  let list = null;                       // the <ul> being filled, if any
+  const flush = () => {
+    if (!para.length) return;
+    const text = para.join(" ");
+    para = [];
+    list = null;
+    const dm = /^\$\$([\s\S]+?)\$\$$/.exec(text);
+    if (dm) { box.append(mathEl(dm[1], true)); return; }
+    const src = SOURCE.exec(text);
+    if (src) {
+      box.append(callout("info", "From Wikipedia", "info",
+        h("p", {}, h("a", { href: src[1], target: "_blank", rel: "noopener noreferrer" }, "Original article"),
+          `. Text under ${src[2]}.`)));
+      return;
+    }
+    const kids = linkify(inline(text, ctx), titles, linked);
+    const note = kids.length === 1 && kids[0].tagName === "EM";       // "Main article: ..."
+    box.append(h("p", { class: note ? "hatnote" : null }, kids));
+  };
+  const lines = md.split("\n");
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n].trimEnd();
+    const fence = /^:::(table|facts)(?: (.*))?$/.exec(line);
+    if (fence) {
+      flush();
+      const body = [];
+      while (++n < lines.length && lines[n] !== ":::") body.push(lines[n]);
+      if (body.length) box.append(tableEl(fence[1], fence[2] || "", body, ctx));
+      continue;
+    }
+    const m = /^(#{1,6})\s+(.*)$/.exec(line);
+    const li = /^( *)(?:[-*]|(\d+)\.) (.+)$/.exec(line);
+    if (m) {
+      flush(); list = null;
+      if (m[1] === "#" && !withTitle) continue;
+      box.append(h("h" + m[1].length, {}, m[2]));
+    } else if (li) {
+      flush();
+      // Nested lists: one <ul>/<ol> per depth, inside the parent's last item.
+      const tag = li[2] ? "OL" : "UL";
+      const depth = Math.floor(li[1].length / 2);
+      if (!list) list = [];
+      while (list.length && (list[list.length - 1].depth > depth ||
+             (list[list.length - 1].depth === depth && list[list.length - 1].el.tagName !== tag))) list.pop();
+      const top = list[list.length - 1];
+      if (!top || top.depth < depth) {
+        const el = h(tag.toLowerCase(), li[2] && li[2] !== "1" ? { start: li[2] } : {});
+        (top && top.el.lastElementChild ? top.el.lastElementChild : box).append(el);
+        list.push({ el, depth });
+      }
+      list[list.length - 1].el.append(h("li", {}, linkify(inline(li[3], ctx), titles, linked)));
+    } else if (!line.trim()) flush();
+    else para.push(line.trim());
+  }
+  flush();
+  if (caret) {
+    const last = box.lastElementChild;
+    (last && last.tagName === "P" ? last : box.appendChild(h("p"))).append(h("span", { class: "caret" }));
+  }
+  return { node: box, linked };
+}
+
+/* ---------- chrome: tab, breadcrumb, header actions ---------- */
+function show(...nodes) { main.replaceChildren(...nodes); $("#scroller").scrollTop = 0; }
+
+function chrome({ tab, crumb = [], back = false, actions = [] }) {
+  $("#tab-title").textContent = tab;
+  const c = $("#crumb");
+  c.replaceChildren();
+  crumb.forEach((part, i) => {
+    if (i) c.append(" / ");
+    c.append(i === crumb.length - 1 ? h("b", {}, part) : part);
+  });
+  $("#back").disabled = !back;
+  $("#actions").replaceChildren(...actions.map((a) =>
+    h("button", { class: "cbtn", "aria-label": a.label, title: a.label, onclick: a.run }, svg(a.icon))));
+}
+
+function setStat(text) {
+  $("#stat").textContent = text
+    ? `${text.trim().split(/\s+/).filter(Boolean).length.toLocaleString()} words  ${text.length.toLocaleString()} characters` : "";
+}
+
+function renderTree() {
+  const tree = $("#tree");
+  const items = app.cached;
+  const folder = h("div", { class: "folder" + (app.folderOpen ? "" : " collapsed") },
+    h("button", { class: "tree-item-self", "aria-expanded": String(app.folderOpen),
+      onclick: () => { app.folderOpen = !app.folderOpen; renderTree(); } },
+      svg("chevron", "s"), svg("folder", "s"), h("span", { class: "label" }, "Wikipedia"),
+      h("span", { class: "count" }, items.length || "")),
+    h("div", { class: "children" }, items.length
+      ? items.map((a) => h("div", { class: "file" },
+          h("button", { class: "tree-item-self" + (app.current && app.current.title === a.title ? " is-active" : ""),
+            title: `${kb(a.bytes)}, fetched ${ago(a.fetched_at)}`, onclick: () => openArticle(a.title) },
+            svg("file", "s"), h("span", { class: "label" }, a.title)),
+          h("button", { class: "drop", "aria-label": `Remove ${a.title} from this device`, title: "Remove from this device",
+            onclick: async () => {
+              await api(`/api/cached?title=${encodeURIComponent(a.title)}`, "DELETE");
+              await loadCached();
+            } }, svg("x", "s"))))
+      : h("div", { class: "empty" }, "Nothing saved yet. Articles you fetch appear here.")));
+  const later = laterGet();
+  const laterFolder = h("div", { class: "folder" + (app.laterOpen ? "" : " collapsed") },
+    h("button", { class: "tree-item-self", "aria-expanded": String(app.laterOpen),
+      onclick: () => { app.laterOpen = !app.laterOpen; renderTree(); } },
+      svg("chevron", "s"), svg("list", "s"), h("span", { class: "label" }, "Read later"),
+      h("span", { class: "count" }, later.length || "")),
+    h("div", { class: "children" }, later.length
+      ? later.map((t) => h("div", { class: "file" },
+          h("button", { class: "tree-item-self", title: "Get it over the radio", onclick: () => openArticle(t) },
+            svg("radio", "s"), h("span", { class: "label" }, t)),
+          h("button", { class: "drop", "aria-label": `Remove ${t} from Read later`, title: "Remove from Read later",
+            onclick: () => laterToggle(t) }, svg("x", "s"))))
+      : h("div", { class: "empty" }, "Links you mark “Read later” collect here.")));
+  tree.replaceChildren(folder, laterFolder);
+}
+
+function renderOutline(view, linkedTitles = []) {
+  const out = $("#outline"), links = $("#links");
+  out.replaceChildren(); links.replaceChildren();
+  const heads = view ? [...view.querySelectorAll("h2, h3")] : [];
+  if (!heads.length) out.append(h("div", { class: "none" }, view ? "No headings" : "Open a note to see its headings."));
+  heads.forEach((el) => out.append(h("button", {
+    class: "tree-item-self" + (el.tagName === "H3" ? " indent" : ""),
+    onclick: () => el.scrollIntoView({ block: "start" }) }, h("span", { class: "label" }, el.textContent))));
+  if (!linkedTitles.length) links.append(h("div", { class: "none" }, "None yet."));
+  linkedTitles.forEach((t) => links.append(h("button", { class: "tree-item-self", onclick: () => openArticle(t) },
+    svg("file", "s"), h("span", { class: "label" }, t))));
+}
+
+/* ---------- views ---------- */
+function home() {
+  clearInterval(app.timer);
+  app.view = "home"; app.current = null;
+  chrome({ tab: "New tab" });
+  const action = (label, hint, run) => h("button", { class: "empty-state-action", onclick: run }, label, hint ? h("small", {}, hint) : null);
+  show(h("div", { class: "empty-state" },
+    h("div", { class: "empty-state-title" }, "Nothing open"),
+    action("Search over radio", "Ctrl K", () => qInput.focus()),
+    app.cached.slice(0, 5).map((a) => action(`Open ${a.title}`, ago(a.fetched_at), () => openArticle(a.title))),
+    h("p", { class: "empty-state-note" },
+      "A request goes out over the radio to the Seed Vault (the Pi holding the Wikipedia library), and the answer comes back as spores: small radio packets. " +
+      "A short article takes about a minute. Saved notes open instantly.")));
+  renderTree(); renderOutline(null); setStat("");
+}
+
+function pickerView(data) {
+  app.view = "results"; app.current = null;
+  const saved = savedSet();
+  chrome({ tab: `Search: ${data.query}`, crumb: ["Search", data.query],
+    actions: data.from_cache ? [{ icon: "refresh", label: "Search again over radio", run: () => runSearch(data.query, true) }] : [] });
+  show(h("div", {},
+    h("div", { class: "search-info" },
+      `${data.results.length} result${data.results.length === 1 ? "" : "s"} for “${data.query}”`,
+      data.from_cache ? `(saved ${ago(data.fetched_at)})` : null),
+    data.results.map((r) => h("button", { class: "search-result", onclick: () => openArticle(r.title) },
+      h("div", { class: "t" }, svg("file", "s"), r.title,
+        saved.has(r.title.toLowerCase()) ? h("span", { class: "saved" }, "saved") : null),
+      r.blurb ? h("div", { class: "m" }, r.blurb) : null))));
+  renderTree(); renderOutline(null); setStat("");
+}
+
+function properties(r) {
+  const m = SOURCE.exec(r.text.split("\n").find((l) => l.startsWith("*Source:")) || "");
+  const how = r.from_cache ? "saved copy"
+    : `over radio in ${secs(r.elapsed)}, ${r.packets} spore${r.packets === 1 ? "" : "s"}`;
+  const row = (icon, key, val) => h("div", { class: "prop" },
+    h("div", { class: "key" }, svg(icon, "s"), key), h("div", { class: "val" }, val));
+  return h("details", { class: "properties", open: "" },
+    h("summary", {}, svg("chevron", "s"), "Properties"),
+    m ? row("link", "source", h("a", { href: m[1], target: "_blank", rel: "noopener noreferrer" }, m[1])) : null,
+    m ? row("scale", "license", m[2]) : null,
+    row("calendar", "fetched", `${day(r.fetched_at)}, ${how}`),
+    row("tag", "tags", [h("span", { class: "tag" }, "#wikipedia"), h("span", { class: "tag" }, "#moss")]));
+}
+
+function articleView(r) {
+  app.view = "article"; app.current = { title: r.title, text: r.text };
+  closeLinkMenu();
+  if (laterHas(r.title)) laterSet(laterGet().filter((x) => x.toLowerCase() !== r.title.toLowerCase()));
+  chrome({ tab: r.title, crumb: ["Wikipedia", r.title], back: !!app.lastResults,
+    actions: [{ icon: "refresh", label: "Fetch again over radio", run: () => openArticle(r.title, true) }] });
+  const titles = app.cached.map((a) => a.title)
+    .filter((t) => t.toLowerCase() !== r.title.toLowerCase() && t.length >= 4)
+    .sort((a, b) => b.length - a.length);
+  const body = renderText(r.text, { withTitle: false, titles });
+  const view = h("div", {}, h("h1", { class: "inline-title" }, r.title), properties(r), body.node);
+  show(view);
+  renderTree(); renderOutline(body.node, [...body.linked]); setStat(r.text);
+}
+
+function failView(message, retry) {
+  app.view = "error";
+  chrome({ tab: "Couldn’t fetch", crumb: ["Radio"], back: !!app.lastResults });
+  show(callout("failure", "That didn’t come through", "alert",
+    h("p", {}, message),
+    h("div", { class: "row-actions" }, retry ? h("button", { class: "btn", onclick: retry }, "Try again") : null,
+      app.lastResults ? h("button", { class: "btn quiet", onclick: () => pickerView(app.lastResults) }, "Back to results") : null)));
+}
+
+/* ---------- the waiting view: where the minute is spent ---------- */
+const STEPS = ["Asked the Seed Vault", "Seed Vault finds it", "Spores arrive", "Checked"];
+const STAGE_AT = { waiting: -1, requesting: 0, queued: 0, fetching: 1, receiving: 2, repairing: 2, verifying: 3, done: 4 };
+
+function airView(kind, label) {
+  app.view = "air"; app.current = null;
+  chrome({ tab: label, crumb: ["Radio", label], back: !!app.lastResults });
+  const say = h("p", { class: "say", role: "status" }, "Asking the Seed Vault…");
+  const sub = h("p", { class: "sub" }, " ");
+  const steps = h("ol", { class: "steps" }, STEPS.map((s) => h("li", {}, s)));
+  const map = h("div", { class: "map idle", role: "img", "aria-label": "Spores received" });
+  for (let i = 0; i < 34; i++) map.append(h("span", { class: "cell", style: `--i:${i}` }));
+  const preview = h("div", {});
+  show(h("div", {}, callout("example", kind === "search" ? "Searching over radio" : "Receiving over radio", "radio", say, sub, steps, map), preview));
+  renderOutline(null); setStat("");
+  return { say, sub, steps, map, preview, kind, label, drawn: -1, prev: null };
+}
+
+function updateAir(ui, p) {
+  p = { have: [], total: 0, attempt: 1, queue_position: 0, elapsed: 0, eta: null, ...p };
+  const at = STAGE_AT[p.stage] ?? 0;
+  [...ui.steps.children].forEach((li, i) => { li.className = i < at ? "done" : i === at ? "now" : ""; });
+
+  const got = p.have.length, left = p.total - got;
+  let say;
+  switch (p.stage) {
+    case "waiting": say = "Another request is using the radio. Yours is next."; break;
+    case "requesting": say = p.message === "looking for the Seed Vault"
+      ? (p.attempt > 1 ? `Looking for the Seed Vault (try ${p.attempt})…` : "Looking for the Seed Vault…")
+      : p.attempt > 1 ? `No pulse yet. Asking again (try ${p.attempt}).` : "Asking the Seed Vault…"; break;
+    case "queued": say = p.queue_position > 0
+      ? `Dormant behind ${p.queue_position} other request${p.queue_position === 1 ? "" : "s"}.` : "Next in line at the Seed Vault."; break;
+    case "fetching": say = ui.kind === "search" ? "The Seed Vault is searching its library for you." : "The Seed Vault is looking up the article."; break;
+    case "receiving": say = p.total
+      ? `${got} of ${p.total} spores received` : "The Seed Vault is releasing. Waiting for the capsule."; break;
+    case "repairing": say = `${left} spore${left === 1 ? "" : "s"} didn’t land. Asking again for the bare patch${left === 1 ? "" : "es"}.`; break;
+    case "verifying": say = "Checking that every byte matches…"; break;
+    default: say = p.message || "";
+  }
+  ui.say.textContent = say;
+
+  const bits = [`${secs(p.elapsed)} so far`];
+  if (p.eta != null && p.total && got < p.total) bits.push(`about ${secs(p.eta)} left`);
+  else if (p.eta != null && !p.total && p.eta > 0) bits.push(`Seed Vault estimates ${secs(p.eta)} on the air`);
+  ui.sub.textContent = bits.join("  ·  ");
+  $("#stat").textContent = p.total ? `${got} / ${p.total} spores` : "";
+
+  if (p.total) {
+    ui.map.classList.remove("idle");
+    ui.map.setAttribute("aria-label", `${got} of ${p.total} spores received`);
+    if (ui.drawn !== p.total) {
+      ui.map.replaceChildren(...Array.from({ length: p.total }, () => h("span", { class: "cell" })));
+      ui.drawn = p.total; ui.prev = null;
+    }
+    const have = new Set(p.have);
+    const repairing = p.stage === "repairing";
+    [...ui.map.children].forEach((c, i) => {
+      const isGot = have.has(i);
+      c.classList.toggle("got", isGot);
+      c.classList.toggle("new", isGot && ui.prev !== null && !ui.prev.has(i));
+      c.classList.toggle("lost", !isGot && repairing);
+    });
+    ui.prev = have;
+  }
+
+  if (p.preview && ui.kind === "article") {
+    ui.preview.replaceChildren(renderText(p.preview, { caret: p.stage !== "done" }).node);
+  }
+}
+
+/* ---------- running jobs ---------- */
+function setBusy(b) { goBtn.disabled = b; }
+
+function track(job, kind, label, onDone, retry) {
+  clearInterval(app.timer);
+  const ui = airView(kind, label);
+  setBusy(true);
+  let fails = 0;
+  const stop = () => { clearInterval(app.timer); setBusy(false); };
+  const tick = async () => {
+    let j;
+    try { j = await api(`/api/job/${job.id}`); fails = 0; }
+    catch {
+      if (++fails >= 10) { stop(); failView("Lost contact with the reader. Is `python -m moss` still running?", retry); }
+      return;
+    }
+    if (j.error && !j.state) { stop(); return failView(j.error, retry); }
+    updateAir(ui, j.progress);
+    if (j.state === "done") { stop(); await loadCached(); onDone(j.result); }
+    else if (j.state === "error") { stop(); failView(j.error, retry); }
+  };
+  app.timer = setInterval(tick, 400);
+  tick();
+}
+
+async function runSearch(q, refresh = false) {
+  q = q.trim();
+  if (!q) { qInput.focus(); return; }
+  qInput.value = q;
+  const retry = () => runSearch(q, refresh);
+  const job = await api("/api/search", "POST", { q, refresh });
+  if (job.error) return failView(job.error, null);
+  track(job, "search", q, (res) => { app.lastResults = res; pickerView(res); }, retry);
+}
+
+async function openArticle(title, refresh = false) {
+  const retry = () => openArticle(title, refresh);
+  const job = await api("/api/article", "POST", { title, refresh });
+  if (job.error) return failView(job.error, null);
+  track(job, "article", title, articleView, retry);
+}
+
+async function loadCached() { app.cached = await api("/api/cached"); renderTree(); }
+
+/* ---------- wiring ---------- */
+$("#find").addEventListener("submit", (e) => { e.preventDefault(); runSearch(qInput.value); });
+$("#back").addEventListener("click", () => { if (app.lastResults) pickerView(app.lastResults); });
+$("#tab-close").addEventListener("click", () => { clearInterval(app.timer); setBusy(false); home(); });
+$("#rb-files").addEventListener("click", (e) => {
+  const off = appEl.classList.toggle("no-left"); e.currentTarget.setAttribute("aria-pressed", String(!off));
+});
+$("#rb-outline").addEventListener("click", (e) => {
+  const off = appEl.classList.toggle("no-right"); e.currentTarget.setAttribute("aria-pressed", String(!off));
+});
+$("#rb-search").addEventListener("click", () => { appEl.classList.remove("no-left"); $("#rb-files").setAttribute("aria-pressed", "true"); qInput.focus(); });
+$("#rb-theme").addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("moss-theme", next); } catch (e) { /* private mode: fine */ }
+});
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+  if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") || (e.key === "/" && !typing)) {
+    e.preventDefault(); appEl.classList.remove("no-left"); qInput.focus(); qInput.select();
+  }
+});
+
+/* The radio can drop out (laptop sleep, cable pulled). The reader reconnects
+   by itself; the status bar says so instead of going quietly dead. */
+async function refreshLink() {
+  const link = $("#link");
+  try {
+    const info = await api("/api/info");
+    const down = info.radio && info.radio !== "connected";
+    link.classList.toggle("sim", !!info.simulated && !down);
+    link.classList.toggle("down", !!down);
+    link.replaceChildren(...[h("span", { class: "dot" }), svg("radio", "s"),
+      down ? "Radio disconnected, reconnecting…" : info.label,
+      !down && info.encrypted ? h("span", { class: "lock" }, svg("lock", "s"), "encrypted") : null]
+      .filter(Boolean));
+    link.title = info.encrypted
+      ? (info.vault ? `Requests and pages are encrypted to the Seed Vault ${info.vault}` : "Encrypted; looking for the Seed Vault")
+      : "Not encrypted";
+  } catch {
+    link.classList.add("down");
+    link.replaceChildren(h("span", { class: "dot" }), "no connection to the reader");
+  }
+}
+
+(async function init() {
+  await refreshLink();
+  setInterval(refreshLink, 3000);
+  await loadCached();
+  home();
+  qInput.focus();
+})();
+</script>
+</body>
+</html>

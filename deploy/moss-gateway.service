@@ -1,0 +1,20 @@
+[Unit]
+Description=MOSS Seed Vault: Wikipedia over a MeshCore radio
+After=local-fs.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+EnvironmentFile=/etc/moss/gateway.env
+Environment=PYTHONUNBUFFERED=1
+# The .zim is on a USB stick that may be mounted a little after boot (or only
+# when the desktop logs in). Wait for it rather than failing straight away.
+ExecStartPre=/bin/sh -c 'for i in $$(seq 1 60); do [ -r "$$MOSS_ZIM" ] && exit 0; sleep 2; done; echo "library not found: $$MOSS_ZIM (is the USB stick plugged in and mounted?)" >&2; exit 1'
+TimeoutStartSec=150
+ExecStart=@REPO@/.venv/bin/python -m moss gateway --port ${MOSS_PORT} --source ${MOSS_ZIM} $MOSS_EXTRA
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
