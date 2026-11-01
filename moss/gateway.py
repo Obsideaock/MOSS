@@ -49,7 +49,8 @@ class Gateway:
     def __init__(self, tx, source, gap: float = 1.0, rounds: int = 10,
                  wait: float = 30.0, settle: float = 1.6, max_queue: int = 6,
                  log: Callable[[str], None] = print, keys: "S.VaultKeys | None" = None,
-                 pad_sizes: bool = False, log_queries: bool = False):
+                 pad_sizes: bool = False, log_queries: bool = False,
+                 capsule_every: int = 50):
         """gap     seconds between datagrams (airtime pacing)
         wait    how long to listen for NACK/DONE after the last chunk; must be
                 comfortably longer than the client's --quiet
@@ -62,12 +63,16 @@ class Gateway:
                     its size says less about what it is (~10% more airtime)
         log_queries write the titles of encrypted requests to the log (off:
                     the Pi keeps no list of what people read)
+        capsule_every  repeat the capsule every N spores (and once more right
+                    away), so a reader that missed it can pick it up without
+                    asking; costs ~2-3% airtime. 0 = send it once.
         """
         self.tx, self.source = tx, source
         self.gap, self.rounds, self.wait, self.settle = gap, rounds, wait, settle
         self.max_queue = max_queue
         self.log = log
         self.keys, self.pad_sizes, self.log_queries = keys, pad_sizes, log_queries
+        self.capsule_every = capsule_every
         self._last_hello = 0.0
         self._answered: list[bytes] = []            # recent WHOIS already answered
         self.sessions: dict[int, Session] = {}
@@ -267,14 +272,21 @@ class Gateway:
         await asyncio.sleep(self.gap)
         await self.tx.send(s.manifest)
         await asyncio.sleep(self.gap)
+        if self.capsule_every and len(s.chunks) > 1:
+            await self.tx.send(s.manifest)        # twice: losing it costs a lot
+            await asyncio.sleep(self.gap)
 
         await self._transmit(s, list(range(len(s.chunks))))
 
     async def _transmit(self, s: Session, to_send: list[int]) -> None:
         """Send these chunks, then repair from the client's NACKs until it says
         DONE, goes quiet, or we run out of rounds."""
+        full = len(to_send) == len(s.chunks)
         for rnd in range(1, self.rounds + 1):
-            for index in to_send:
+            for n, index in enumerate(to_send):
+                if full and rnd == 1 and self.capsule_every and n and n % self.capsule_every == 0:
+                    await self.tx.send(s.manifest)    # for a reader that missed it
+                    await asyncio.sleep(self.gap)
                 await self.tx.send(P.build_chunk(s.rid, index, s.chunks[index]))
                 await asyncio.sleep(self.gap)
 

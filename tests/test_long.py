@@ -76,6 +76,54 @@ class LongArticleTests(unittest.TestCase):
             self.assertEqual(page.text, self.expected, f"seed {seed}")
 
 
+class DeafTransmitterTests(unittest.TestCase):
+    """The 2026-10-26 incident: the capsule was lost, and the reader's radio
+    could still receive but not transmit, so it couldn't ask for the capsule
+    again. The Seed Vault repeats the capsule so a reader can recover
+    without asking."""
+
+    def run_incident(self, capsule_every, capsules_lost=1):
+        async def go():
+            net = SimNetwork()
+            vault_tx, reader_tx = net.endpoint("vault"), net.endpoint("reader")
+            for _ in range(capsules_lost):                                     # capsule(s) lost
+                reader_tx.drop_next.append(lambda raw: raw[0] in (P.MANIFEST,))
+            sent = {"n": 0}
+            real_send = reader_tx.send
+
+            async def send(raw):                       # after its request, nothing gets out
+                sent["n"] += 1
+                if sent["n"] == 1:
+                    await real_send(raw)
+            reader_tx.send = send
+            gw = Gateway(vault_tx, LocalSource(long_article_folder(), None), gap=0.0, wait=1.0,
+                         settle=0.1, log=lambda m: None, capsule_every=capsule_every)
+            await gw.start()
+            client = MossClient(reader_tx, Cache(tempfile.mkdtemp()), quiet=0.4,
+                                request_timeout=1.0, fetch_timeout=4.0, idle=4.0,
+                                manifest_retry=0.2, nack_spacing=0.05)
+            try:
+                return await client.article("Long article")
+            finally:
+                await gw.stop()
+        return run(go())
+
+    def test_without_repeats_the_reader_is_stuck(self):
+        from moss.client import MossError
+        with self.assertRaises(MossError):
+            self.run_incident(capsule_every=0)
+
+    def test_repeated_capsule_rescues_it(self):
+        page = self.run_incident(capsule_every=50)
+        self.assertIn("Long article", page.text)
+
+    def test_mid_transfer_capsule_rescues_it(self):
+        """Both copies at the start lost: the one sent at spore 50 saves it,
+        and the spores heard before it are kept."""
+        page = self.run_incident(capsule_every=50, capsules_lost=2)
+        self.assertIn("Long article", page.text)
+
+
 class LostManifestTests(unittest.TestCase):
     def test_manifest_lost_twice_keeps_early_chunks(self):
         """The first manifest and its re-send both vanish. The client must keep

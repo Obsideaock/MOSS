@@ -33,17 +33,18 @@ read is encrypted: other people on the mesh can't tell what you're reading.
 6. [Using the reader](#using-the-reader)
 7. [The #moss channel](#the-moss-channel)
 8. [Private reading (encryption)](#private-reading-encryption)
-9. [How it works](#how-it-works)
-10. [Speed and airtime](#speed-and-airtime)
-11. [Being a good mesh neighbour](#being-a-good-mesh-neighbour)
-12. [If the radio drops out](#if-the-radio-drops-out)
-13. [Troubleshooting](#troubleshooting)
-14. [Command reference](#command-reference)
-15. [Where things are stored](#where-things-are-stored)
-16. [Testing](#testing)
-17. [FAQ](#faq)
-18. [Not built yet](#not-built-yet)
-19. [Credits, licences and further reading](#credits-licences-and-further-reading)
+9. [Community pages (in progress)](#community-pages-in-progress)
+10. [How it works](#how-it-works)
+11. [Speed and airtime](#speed-and-airtime)
+12. [Being a good mesh neighbour](#being-a-good-mesh-neighbour)
+13. [If the radio drops out](#if-the-radio-drops-out)
+14. [Troubleshooting](#troubleshooting)
+15. [Command reference](#command-reference)
+16. [Where things are stored](#where-things-are-stored)
+17. [Testing](#testing)
+18. [FAQ](#faq)
+19. [Not built yet](#not-built-yet)
+20. [Credits, licences and further reading](#credits-licences-and-further-reading)
 
 ---
 
@@ -70,28 +71,40 @@ reads like any other networking code.
 
 ## Quick start
 
-**Pi (Seed Vault)**, once set up (see below):
+**Install**, one command per machine. It asks whether the machine is a
+reader or a Seed Vault, finds the radio (and on the Pi the `.zim` on the
+USB stick), and sets everything up.
+
+Pi (Seed Vault), in a terminal:
+```bash
+curl -sSL https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.sh | bash
+```
+
+Laptop (reader), in PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.ps1 | iex
+```
+
+**Then just type `moss`.** You get a menu for everything: the reader, search,
+your pages and identities, a radio range check, settings and updates on a
+laptop; status, logs, start/stop, library and updates on the Pi. Arrow keys
+to move, Enter to pick, Ctrl+C to go back.
+
+Everything in the menu is also a plain command, for scripts:
 
 ```bash
-cd ~/MOSS
-.venv/bin/python -m moss gateway --port /dev/serial/by-id/usb-... \
-    --source /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim
-# or, as a service: sudo systemctl restart moss-gateway
+moss web                     # the browser reader (http://127.0.0.1:8765)
+moss search "boulder"        # search, pick, read in the terminal
+moss radio-check listen      # range test: listen for pings on #moss (pauses a Seed Vault)
+moss radio-check send        # ...and send them from the other radio
+moss update                  # newest MOSS from GitHub
 ```
 
-**Laptop (reader)**, in PowerShell:
+The radio's port is remembered by setup, so `--port` is only needed to
+override it. No channel setting is needed either: both sides find (or
+create) `#moss` on their radio.
 
-```powershell
-cd C:\Users\<you>\Documents\MOSS
-.venv\Scripts\activate
-python -m moss web --port COM12          # opens http://127.0.0.1:8765
-```
-
-Start the Pi first. No channel setting is needed: both sides find (or
-create) the `#moss` channel on their radio. If only one radio is plugged in,
-`--port` can be left out.
-
-**No radios at hand?** `python -m moss web --sim TestExamples/mini_wikipedia.zim`
+**No radios at hand?** `moss web --sim TestExamples/mini_wikipedia.zim`
 runs the whole thing on one laptop over a simulated, lossy radio.
 
 ---
@@ -112,6 +125,14 @@ MOSS/
 │   ├── tables.py              rebuilds tables sent "disassembled"
 │   ├── cache.py               saved articles on the laptop (~/.moss/cache)
 │   ├── vault.py               saved articles -> Obsidian notes
+│   ├── pages.py               community pages: author identities, addresses, signed page files
+│   ├── pages_cli.py           python -m moss author ... / page ...
+│   ├── menu.py + ui.py        `moss` with no arguments: the menu
+│   ├── setup.py               `moss setup`: reader or Seed Vault, radio, library, service
+│   ├── config.py              what setup remembers (~/.moss/config.json)
+│   ├── service.py             the Pi's background service and its settings
+│   ├── radiocheck.py          range test: pings on #moss
+│   ├── updater.py             `moss update` from GitHub
 │   ├── web.py + index.html    the browser reader (localhost only)
 │   ├── static/katex/          formula drawing, bundled so it works offline
 │   └── cli.py                 python -m moss ...
@@ -123,7 +144,9 @@ MOSS/
 │   ├── ping_test.py, datagram_test.py, diagnose.py, reset_radio.py, fault_test.py, ...
 │   └── fetch_page.py          used by the live-Wikipedia source
 ├── TestExamples/              fixtures, plus mini_wikipedia.zim (about 80 KB)
-├── deploy/                    Pi service: install-gateway.sh, moss-gateway.service, gateway.env
+├── deploy/                    Pi service template and settings template (used by setup)
+├── install.sh, install.ps1    the one-line installers (Linux/Pi/Mac, Windows)
+├── pyproject.toml             makes `pip install -e .` provide the moss command
 ├── requirements.txt           reader (laptop)
 └── requirements-gateway.txt   Seed Vault
 ```
@@ -148,44 +171,48 @@ Where things live on the Pi:
 /etc/systemd/system/moss-gateway.service   starts the Seed Vault on boot
 ```
 
-Setup:
+Setup, one command:
 
 ```bash
-git clone https://github.com/Obsideaock/MOSS.git ~/MOSS
-cd ~/MOSS
-sudo bash deploy/install-gateway.sh        # venv, libzim, serial permission, service
-# log out and back in once, so your user can open the radio's serial port
-
-# plug in the KIWIX stick, then check the library, no radio needed:
-.venv/bin/python -m moss library /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim "boulder colorado"
-
-ls -l /dev/serial/by-id/              # find the radio's stable name
-sudo nano /etc/moss/gateway.env       # set MOSS_PORT
-
-# run it by hand first, to watch it:
-.venv/bin/python -m moss gateway --port /dev/serial/by-id/usb-... \
-    --source /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim
-
-# then as a service:
-sudo systemctl start moss-gateway
-journalctl -u moss-gateway -f         # watch requests come in
+curl -sSL https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.sh | bash
 ```
 
-On first start the Seed Vault:
+It installs git and Python's venv if needed, puts MOSS in `~/MOSS` (or
+updates an existing `~/MOSS` or `~/Documents/MOSS` in place), makes the
+Python environment, adds the `moss` command, lets your user open serial
+ports, and then runs `moss setup`, which:
 
-- creates `#moss` on its radio if it isn't there (in a free slot; never over
-  Public or a slot in use),
-- creates its keys in `~/.moss/seed-vault/` and prints its **fingerprint**
-  (`python -m moss vault-key` shows it again later),
-- announces itself once on `#moss`.
+- finds the radio by its stable `/dev/serial/by-id/...` name and checks it
+  answers (creating `#moss` on it if needed, in a free slot, never over
+  Public or a slot in use);
+- finds the `.zim` on the USB stick;
+- keeps existing Seed Vault keys, or makes them, and shows the
+  **fingerprint**;
+- writes `/etc/moss/gateway.env`, keeping your old values and options;
+- installs the `moss-gateway` service (starts on boot) and starts it.
+
+Log out and back in once afterwards if it says it added you to the
+`dialout` group.
 
 **Back up `~/.moss/seed-vault/`.** New keys mean every reader sees a
 different fingerprint and has to re-trust the vault.
 
-`sudo bash deploy/install-gateway.sh` is safe to re-run; it never overwrites
-an edited `/etc/moss/gateway.env`. An older settings file with a
-`MOSS_CHANNEL=` line, or an older service that still passes `--channel N`,
-keeps working: the setting is simply ignored now.
+Day to day, type `moss` on the Pi: status and recent log, watch the log
+live, start/stop/restart, radio check, change library or radio port, extra
+options, update. The same by hand:
+
+```bash
+sudo systemctl stop moss-gateway       # pause it
+sudo systemctl start moss-gateway      # start it again
+sudo systemctl restart moss-gateway    # after changing settings
+journalctl -u moss-gateway -f          # watch requests come in
+moss library /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim "boulder colorado"   # test the library, no radio
+```
+
+On first start the Seed Vault announces itself once on `#moss`. An older
+settings file with a `MOSS_CHANNEL=` line, or an older service that still
+passes `--channel N`, keeps working: the setting is simply ignored now.
+`deploy/install-gateway.sh` still works too, but the installer replaces it.
 
 ### USB stick
 
@@ -219,8 +246,8 @@ short name, which lives in `/dev/`, not in `/dev/serial/by-id/`.
 
 ### Seed Vault options worth knowing
 
-Put these in `MOSS_EXTRA=` in `/etc/moss/gateway.env` (then
-`sudo systemctl restart moss-gateway`):
+Set these from `moss` → *Extra options*, or put them in `MOSS_EXTRA=` in
+`/etc/moss/gateway.env` and run `sudo systemctl restart moss-gateway`:
 
 | Option | What it does |
 |---|---|
@@ -246,31 +273,74 @@ C:\Users\<you>\.moss\vault.json            which Seed Vault this laptop trusts
 <your Obsidian vault>\Wikipedia\           only if you run `moss export`
 ```
 
-Setup (PowerShell, Python 3.11+):
+Setup, one command in PowerShell:
 
 ```powershell
-git clone https://github.com/Obsideaock/MOSS.git
-cd MOSS
-py -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-
-python -m moss web --port COM12      # opens http://127.0.0.1:8765
+irm https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.ps1 | iex
 ```
 
-Find the COM port in Device Manager under *Ports (COM & LPT)*, or leave
-`--port` out when only one radio is plugged in.
+It checks for Git and Python 3.10+ (offering to install them with winget),
+puts MOSS in `C:\Users\<you>\MOSS` (or updates an existing `MOSS` or
+`Documents\MOSS` checkout in place), makes the Python environment, adds the
+`moss` command to your PATH, and runs `moss setup`, which finds the radio's
+COM port, checks it answers, creates `#moss` on it if needed, and remembers
+the port. Open a new terminal afterwards and type `moss`.
 
-The command line works too:
+The commands, if you'd rather skip the menu:
 
 ```powershell
-python -m moss search "shrubbies band" --port COM12     # search, pick, read
-python -m moss read "Boulder, Colorado" --port COM12    # one article by title
-python -m moss cache                                    # what's saved (no radio)
-python -m moss cache show "Boulder, Colorado"           # read a saved article offline
-python -m moss export C:\path\to\ObsidianVault          # saved articles -> notes
-python -m moss trust                                    # which Seed Vault is trusted
+moss web                                    # the browser reader
+moss search "shrubbies band"                # search, pick, read
+moss read "Boulder, Colorado"               # one article by title
+moss cache                                  # what's saved (no radio)
+moss cache show "Boulder, Colorado"         # read a saved article offline
+moss export C:\path\to\ObsidianVault       # saved articles -> notes
+moss trust                                  # which Seed Vault is trusted
 ```
+
+`python -m moss ...` from inside the MOSS folder (with `.venv` active)
+still works exactly the same.
+
+### Updates and branches
+
+`moss update` (or *Update MOSS* in the menu) gets the newest code from
+GitHub. There are two branches:
+
+| Branch | For |
+|---|---|
+| `main` | Stable. What every machine follows by default. |
+| `experimental` | Newest changes, for testing before they go to main. |
+
+`moss update --branch experimental` switches this machine to testing (it's
+remembered); `moss update --branch main` switches back. Updating only ever
+moves forward: edits you made in the MOSS folder are set aside with
+`git stash` (it tells you, and `git stash pop` brings them back), and if the
+folder has commits GitHub doesn't, it stops and changes nothing. On the Pi
+it restarts the Seed Vault afterwards.
+
+Publishing a change (on the machine you develop on):
+
+```bash
+git checkout experimental
+# ...make changes...
+git commit -am "what changed"
+git push                          # testers: moss update --branch experimental
+# once it's stable:
+git checkout main
+git merge experimental
+git push                          # everyone else: moss update
+```
+
+### Radio check
+
+To test whether two radios hear each other (and how far apart they can be),
+run `moss radio-check listen` on one and `moss radio-check send` on the other,
+or pick *Radio check* in the menu on both. It sends ten short numbered chat
+messages on `#moss` and shows each one that arrives with its signal-to-noise
+ratio. On the Pi it pauses the Seed Vault for the test and starts it again
+afterwards. `moss radio-check info` shows the radio's frequency, bandwidth,
+spreading factor and coding rate; two radios must match on all four to hear
+each other at all.
 
 ---
 
@@ -387,7 +457,118 @@ read is readable only by you and the Seed Vault.**
   read ("article (encrypted; not logged)"). `--log-queries` turns that on for
   debugging.
 
-### How it works
+### Community pages (in progress)
+
+Anyone will be able to publish their own pages to a Seed Vault. The full
+design (visibility, ranking, the review queue, what vault owners can and
+can't do, safety requirements) is in the *MOSS Community Pages Design* doc.
+It's being built in five stages:
+
+1. **Identities and signed pages** ← done (this version)
+2. Uploading to a Seed Vault
+3. Reading and finding pages (search, following, author pages)
+4. Locked (password-protected) pages
+5. Owner tools: removal log, review queue, quiet-hours scheduling
+
+Right now you can make identities and signed pages on the laptop. Nothing
+is sent over the radio yet; finished pages wait in `~/.moss/outbox/` for
+stage 2.
+
+### Identities
+
+An author is a signing key. Your first one gets your display name and
+becomes the default; you can hold as many as you like.
+
+```bash
+python -m moss author new "Stern"
+python -m moss author list
+python -m moss author backup Stern stern-key.json     # asks for a passphrase
+python -m moss author restore stern-key.json       # on a new laptop
+```
+
+**Back up your identity.** Without the key you can never update or delete
+pages you published with it. The backup file is encrypted with your
+passphrase (scrypt + AES-256); keep the file and the passphrase in
+different places.
+
+Display names aren't unique, so every identity also has a fingerprint
+(`98E1-228D-51E0-2612`) to tell two "Stern"s apart.
+
+### Page addresses
+
+```
+moss:tdqsfdkr4atbevcpy7m6hf3rli/water-filters
+     └───── author id ────────┘ └─ name ─┘
+```
+
+The author id is 128 bits of a hash of the author's key, so nobody can
+make another key that claims your addresses. An address works on any vault
+that carries the page.
+
+### Public and unlisted
+
+| | Public | Unlisted |
+|---|---|---|
+| In search | Yes, for everyone | Never |
+| Listed under its author | Yes | Never |
+| Download counts | Yes | Never |
+| Opens from its link | Yes | Yes |
+| Name in the address | Readable (`water-filters`) | Random (`~welybxz2x7ivrn7h`), so the link doesn't give the topic away |
+
+An unlisted link still names its author, so someone holding it could look
+up your public pages. To prevent that, post it from a fresh **anonymous
+identity**: a nameless key made for that page alone. Your laptop keeps
+it, so you can still update the page, but nothing links it to you.
+
+```bash
+python -m moss page make water-filters.md                        # public, as your default identity
+python -m moss page make clinic-hours.md --unlisted --anonymous  # link-only, nothing ties it to you
+python -m moss page make notes.md --as "Other Name"              # a different identity of yours
+```
+
+The title comes from the file's first `# ` heading (or `--title`); the one
+line shown in search is its first sentence (or `--about`). Pages can hold
+everything articles do: links, `$math$`, tables, Key facts.
+
+### Updating, restoring and deleting
+
+```bash
+python -m moss page mine                                  # what you've published
+python -m moss page update moss:<id>/water-filters new.md # becomes v2
+python -m moss page history moss:<id>/water-filters       # versions saved on this laptop
+python -m moss page restore moss:<id>/water-filters 1     # v1's text back, as v3
+python -m moss page delete moss:<id>/water-filters        # a signed "deleted" version
+python -m moss page check ~/.moss/outbox/<file>.mosspage --show
+```
+
+Every change is a new, higher version. Readers and vaults refuse a lower
+version than one they've seen, so nobody can replay an old signed copy to
+undo your fix. You can always bring old text back yourself with `restore`.
+
+### What makes a page trustworthy
+
+A `.mosspage` file is a signed record plus the compressed text. The
+record holds:
+
+- the address, author name and key;
+- title, one-line description, version and date;
+- public or unlisted, deleted or not;
+- the text's size and SHA-256 hash.
+
+It's signed with Ed25519. A page is accepted only when:
+
+- the signature checks;
+- the key owns the address;
+- the record is in its one exact (canonical) form;
+- the text matches the size and hash.
+
+Change any single byte and it's refused; the tests try every byte. Text
+that would expand to more than 2 MB is refused too, so a page can't be a
+compression bomb.
+
+---
+
+## How it works
 
 It's the standard HPKE pattern (RFC 9180) built from standard pieces:
 X25519 key exchange, HKDF-SHA256 and ChaCha20-Poly1305, from the
@@ -477,6 +658,8 @@ bytes of channel data per message; MOSS uses 163 per message for itself.
 3. **Pulses**: the vault answers *dormant* (queued, with your place in line),
    then *looking it up*, then *sending* (with an estimated time).
 4. **Capsule**: how many spores, their total size, and a hash of the page.
+   It's sent twice at the start and again every 50 spores (about 2–3% extra
+   airtime), so a reader that missed it can pick it up without asking.
 5. **Spores**: the page, compressed and encrypted, cut into numbered
    158-byte slices, one per message, paced by `--gap`.
 6. **Bare patches**: when the radio goes quiet, the reader sends the numbers
@@ -489,14 +672,18 @@ bytes of channel data per message; MOSS uses 163 per message for itself.
 
 Built in for a lossy radio:
 
-- If the **capsule** is lost, spores that arrive anyway are kept, and the
-  reader asks for the capsule again.
+- If the **capsule** is lost, spores that arrive anyway are kept; the reader
+  asks for it again and also catches the next repeat (every 50 spores), which
+  works even if the reader's radio can't transmit for a while.
 - If a **bare-patch list** is lost several times and the vault gives up
   waiting, the reader's next list makes it pick the transfer back up.
 - The reader only gives up after **15 asks in a row that bring nothing
   new**; asks that make progress don't count.
 - If an **error** or capsule is lost, the reader asks again and the vault
   repeats its last answer.
+- If the radio **refuses** to send something (its queue is full or it's
+  busy), the send is retried, logged, and if the radio keeps refusing, the
+  link is reopened.
 - One transfer at a time on the air: other requests wait (*dormant*) at the
   vault, up to six.
 
@@ -699,6 +886,15 @@ re-detecting the COM port if it changed (when `--port` was left out). The
 red with *Radio disconnected, reconnecting…* until then, and a transfer in
 progress carries on afterwards.
 
+Polls can also go unanswered on a perfectly healthy radio (for example when
+it passes along a kind of message the MeshCore library can't read). So
+before declaring the link lost, MOSS asks the radio a simple "what device are
+you?" question, and only reconnects if that goes unanswered too. Every
+disconnect message says why (`radio link lost: the radio stopped answering
+(...)`), and if reopening keeps failing, the error is shown on the first try
+and every fifth. `--debug` prints everything the radio and the MeshCore
+library say, for chasing anything stranger.
+
 `tools/reset_radio.py` is still there for a radio that's genuinely stuck:
 `--who` shows what's holding the port, `--hard` reboots the board over serial.
 
@@ -714,13 +910,20 @@ progress carries on afterwards.
 | `page came through blighted` | Damaged or tampered page | Try again. Repeated blight with no interference around is worth investigating. |
 | `all N channel slots on this radio are in use` | No free slot to create #moss in | Remove a channel in the MeshCore app, or add `#moss` there yourself. |
 | `slot N is a channel called #moss with a different key` | Someone's private channel shares the name | Harmless; MOSS uses its own slot. Rename that channel if it's confusing. |
+| `moss` isn't recognised | The terminal was open before installing | Open a new terminal (on Linux, or log out and in). |
+| `this copy has commits GitHub doesn't` on update | Local commits in the MOSS folder | Push them, or `git status` to sort it out; nothing was changed. |
 | `no such port` | Wrong `--port` | The message lists the ports found; on the Pi use the full `/dev/serial/by-id/...` path. |
 | `... stayed busy` / `Access is denied` at start | Another program (MeshCore app, another terminal) holds the port | Close it, or `python tools/reset_radio.py --who`. |
 | Status bar red, *reconnecting…* | Radio unplugged or laptop just woke | Wait or replug; it recovers by itself. |
+| `radio link lost: ...` and it never comes back | The reason is in the message; `still can't reopen COM12` lines say why reopening fails | Close anything else using the port; replug; run with `--debug` and look at the last lines. |
+| `the signing key doesn't own this address` / `signature doesn't match` | A page that was forged or altered | Don't trust it. |
+| `older version ... refused` | Someone (or a vault) offered an older copy of a page you've seen newer | Nothing to do; you keep the newer one. |
 | `reading a .zim needs libzim` | libzim not installed | `pip install -r requirements.txt` (or `pip install libzim`). |
 | `library not found` in the Pi's service log | USB stick not mounted | Plug it in; see [USB stick](#usb-stick). |
 | First search on the Pi takes several seconds | Cold USB stick | Use a USB 3 port; later searches are faster. |
 | Many repairs on every transfer | Gap too short, interference, or weak signal | Raise `--gap`, move radios, check antennas. |
+| `the radio refused to send a message 3 times` | The radio's send queue is full or it's throttling itself | Occasional: harmless, the protocol repeats it. Constant: raise `--gap`; if it says it's reopening the link, it's recovering by itself. |
+| Stuck on *Waiting for the capsule* | The capsule was lost and the reader's asks aren't getting out | It now catches a repeated capsule within 50 spores. If it still gives up, check the laptop's terminal for "refused to send" lines. |
 | Article shows `shortened to save airtime` | The vault runs with `--max-bytes` | Remove it from `MOSS_EXTRA`, then refresh the article. |
 | A saved article lacks links, math or tables | Saved by an older version | Refresh it (circular arrow). |
 
@@ -732,6 +935,10 @@ Run `python -m moss <command> --help` for every option.
 
 | Command | Where | What it does |
 |---|---|---|
+| *(nothing)* / `menu` | Both | The menu. |
+| `setup [--role reader/vault] [--port P] [--zim Z] [--yes]` | Both | Set this machine up (the installers run this). |
+| `update [--branch main/experimental]` | Both | Newest MOSS from GitHub. |
+| `radio-check send/listen/info` | Both | Range test with pings on `#moss`; `info` shows the radio's settings. |
 | `gateway` | Pi | Run the Seed Vault (`--source` a .zim, `wikipedia`, or a folder of .md). |
 | `vault-key` | Pi | Show (creating if needed) the Seed Vault's fingerprint. |
 | `library <source> "query"` | Pi | Search the library directly, no radio; shows an article and its airtime cost. |
@@ -741,15 +948,21 @@ Run `python -m moss <command> --help` for every option.
 | `cache [show/forget] ["Title"]` | Laptop | List, read or delete saved articles (no radio). |
 | `export <vault>` | Laptop | Write saved articles into an Obsidian vault. |
 | `trust [FINGERPRINT] [--forget]` | Laptop | Show, pin or forget the trusted Seed Vault. |
+| `author [list/new/use/rename/backup/restore]` | Laptop | Your author identities for community pages. |
+| `page make FILE.md [--unlisted] [--anonymous] [--as NAME]` | Laptop | Sign a new page into the outbox. |
+| `page update/restore/delete/history ADDRESS` | Laptop | New versions of your pages. |
+| `page check FILE.mosspage [--show]` | Anywhere | Verify a page file's signature and print it. |
+| `page mine` | Laptop | Everything you've published. |
 
 Options shared by radio commands: `--port`, `--channel-name` (default
-`#moss`), `--scope`, `--cache`. Reader options: `--refresh` (ask over radio
+`#moss`), `--scope`, `--cache`, `--debug`. Reader options: `--refresh` (ask over radio
 even if saved), `--quiet` (seconds of silence before asking for bare
 patches, default 6), `--idle`, `--plain`, `--no-pager`, and `--sim FOLDER_OR_ZIM`
 (with `--sim-loss`, `--sim-airtime`, `--pad-sizes`, `--no-links`) for a
 simulated radio. Seed Vault options are in the table [above](#seed-vault-options-worth-knowing),
 plus `--rounds` (repair rounds per wait, default 10) and `--wait` (seconds to
-listen for bare patches, default 30).
+listen for bare patches, default 30). The capsule repeat interval (50 spores)
+is a `Gateway` setting in code (`capsule_every`).
 
 ---
 
@@ -761,11 +974,19 @@ listen for bare patches, default 30).
 | `~/.moss/cache/index.json` | Laptop | Titles, sizes, when fetched |
 | `~/.moss/cache/searches.json` | Laptop | Past searches and their results |
 | `~/.moss/vault.json` | Laptop | The trusted Seed Vault's public keys and fingerprint |
+| `~/.moss/config.json` | Both | What setup remembered: reader or vault, radio port, channel, scope, update branch |
 | Browser storage | Laptop | The *Read later* list and light/dark theme |
+| `~/.moss/authors/<id>/key.pem` | Laptop | An author identity's private signing key (readable only by you; back it up) |
+| `~/.moss/authors/<id>/pages.json`, `history/` | Laptop | Pages you published with it, and every version's text |
+| `~/.moss/authors/default` | Laptop | Which identity `page make` uses |
+| `~/.moss/outbox/*.mosspage` | Laptop | Signed pages waiting to be uploaded |
+| `~/.moss/seen-pages.json` | Laptop | Newest version seen of each page, so old copies can't be replayed |
 | `~/.moss/seed-vault/x25519.pem`, `ed25519.pem` | Pi | The Seed Vault's private keys (readable only by its user) |
 | `/etc/moss/gateway.env` | Pi | Service settings |
 
-`~` is `C:\Users\<you>` on Windows and `/home/<you>` on the Pi. Saved
+`~` is `C:\Users\<you>` on Windows and `/home/<you>` on the Pi. Set
+`MOSS_HOME` to keep identities, outbox and seen pages somewhere other than
+`~/.moss`. Saved
 articles aren't encrypted on the laptop's disk.
 
 ---
@@ -787,7 +1008,18 @@ including:
   unencrypted it recovers everything, encrypted it recovers nothing;
 - a fake Seed Vault, a forged spore, a changed vault key, pinned
   fingerprints, padding;
-- a fake MeshCore radio for reconnects (sleep, unplug, failed writes) and the
+- **install and update**: settings files rewritten without losing comments,
+  `moss update` against real git repositories (moving forward, stashing
+  local edits, refusing local commits, switching branches), setup keeping
+  existing vault keys and settings, and the radio check on a fake radio
+  (including pausing and restarting the vault);
+- **signed pages** under attack: every single byte flipped, records edited
+  or re-signed by another key, signatures without their context, non-canonical
+  and duplicate-field records, replayed old versions, two pages signed with
+  one version, compression bombs, and anonymous pages checked for any trace
+  of the author's other identities;
+- a fake MeshCore radio for reconnects (sleep, unplug, failed writes, a
+  healthy radio sending messages the library can't read) and the
   `#moss` channel (create, reuse, skip Public, private name clashes, other
   channels ignored, scopes);
 - the article converter against real Wikipedia pages from Kiwix's own test
@@ -857,9 +1089,7 @@ thing.
 
 Ideas discussed for later:
 
-- **Adding your own pages** to the Seed Vault from a laptop (same transfer,
-  the other direction), with moderation, signed authors, and a separate shelf
-  so Wikipedia can't be overwritten.
+- **Community pages, stages 2–5** (see [above](#community-pages-in-progress)).
 - **Page types**: boards/forums (fetch only what's new), status pages
   broadcast once to everyone (signed, unencrypted), maps (base maps
   preloaded, small layers of points over the air).

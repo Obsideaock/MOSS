@@ -23,6 +23,7 @@ class EventType:
     DISCONNECTED = "disconnected"
     CHANNEL_INFO = "channel_info"
     DEVICE_INFO = "device_info"
+    CHANNEL_MSG_RECV = "channel_message"
 
 
 class Event:
@@ -40,6 +41,7 @@ class Factory:
         self.slots[0] = ("Public", PUBLIC_KEY)
         self.scopes_supported = scopes
         self.scope_sets: list = []
+        self.refuse_sends = 0           # how many sends the radio will refuse next
 
     async def create_serial(self, port, baud):
         if self.port_held:
@@ -69,14 +71,19 @@ class FakeRadio:
     def __init__(self, factory):
         self.factory = factory
         self.subs: dict = {}
-        self.inbox: list[tuple[int, bytes]] = []   # (channel slot, payload)
+        self.inbox: list = []           # (slot, payload bytes) or (slot, "chat text")
+        self.self_info = {"name": "Fake Heltec", "radio_freq": 910.525, "radio_bw": 62.5,
+                          "radio_sf": 7, "radio_cr": 5, "tx_power": 22}
+        self.chat_sent: list[tuple[int, str]] = []
         self.sent: list[tuple[int, bytes]] = []
         self.silent = False             # asleep: polls go unanswered
+        self.unreadable = 0             # polls answered with messages the library can't parse
         self.closed = False
         self.commands = types.SimpleNamespace(
             get_msg=self.get_msg, send_channel_data=self.send_channel_data,
             send_device_query=self.send_device_query, get_channel=self.get_channel,
-            set_channel=self.set_channel, set_flood_scope=self.set_flood_scope)
+            set_channel=self.set_channel, set_flood_scope=self.set_flood_scope,
+            send_chan_msg=self.send_chan_msg)
 
     @property
     def is_connected(self):
@@ -91,10 +98,18 @@ class FakeRadio:
 
     async def get_msg(self, timeout=None):
         await asyncio.sleep(0.005)
-        if self.silent:
+        if self.silent or self.unreadable:
+            # silent: asleep. unreadable: the radio answers, but with a message
+            # type the library can't parse, so the poll times out anyway.
+            if self.unreadable:
+                self.unreadable -= 1
             return Event(EventType.ERROR, {"reason": "no_event_received"})
         if self.inbox:
             slot, raw = self.inbox.pop(0)
+            if isinstance(raw, str):
+                await self.fire(EventType.CHANNEL_MSG_RECV,
+                                {"channel_idx": slot, "text": raw, "SNR": 6.5})
+                return Event(EventType.CHANNEL_MSG_RECV, {})
             await self.fire(EventType.CHANNEL_DATA_RECV,
                             {"channel_idx": slot, "data_type": 0xFF01, "payload": raw.hex()})
             return Event(EventType.CHANNEL_DATA_RECV, {})
@@ -103,10 +118,21 @@ class FakeRadio:
     async def send_channel_data(self, channel, data_type, data):
         if self.silent or self.closed:
             raise OSError("write failed")
+        if self.factory.refuse_sends:
+            self.factory.refuse_sends -= 1
+            return Event(EventType.ERROR, {"error_code": 3})     # e.g. its queue is full
         self.sent.append((channel, data))
         return Event(EventType.OK, {})
 
+    async def send_chan_msg(self, channel, text):
+        if self.silent or self.closed:
+            raise OSError("write failed")
+        self.chat_sent.append((channel, text))
+        return Event(EventType.OK, {})
+
     async def send_device_query(self):
+        if self.silent:
+            return Event(EventType.ERROR, {"reason": "no_event_received"})
         return Event(EventType.DEVICE_INFO, {"max_channels": len(self.factory.slots)})
 
     async def get_channel(self, idx):

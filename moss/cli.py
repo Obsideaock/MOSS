@@ -1,5 +1,8 @@
 """Command line for MOSS.
 
+  Just type  moss  for a menu of everything below. Install with one line
+  (see README), then  moss setup  remembers your radio, so --port is optional.
+
   Seed Vault, the gateway (radio + a library: a Kiwix .zim file, Wikipedia online, or a folder):
     python -m moss gateway --port /dev/ttyACM0 --source /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim
     python -m moss gateway --port COM16                             # live Wikipedia (needs internet)
@@ -18,6 +21,11 @@
   Check a library without any radio (run it on the Pi):
     python -m moss library /media/moss/KIWIX/wikipedia_en_all_nopic_2026-06.zim "boulder colorado"
 
+  Community pages (no radio needed yet; uploading comes next):
+    python -m moss author new "Your Name"                 # make your author identity
+    python -m moss page make water-filters.md             # sign a page, ready to upload
+    python -m moss page make notes.md --unlisted --anonymous
+
   No hardware? Run a pretend radio with a gateway built in:
     python -m moss web --sim TestExamples --sim-loss 0.1
     python -m moss web --sim TestExamples/mini_wikipedia.zim       # or any .zim
@@ -26,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import asyncio
 import contextlib
 import pydoc
@@ -44,7 +53,8 @@ from .sources import LocalSource, WikipediaSource
 from .transport import MeshCoreTransport, SimNetwork
 from . import seal as S
 
-DEFAULT_VAULT_KEYS = Path.home() / ".moss" / "seed-vault"
+from .config import moss_home as _moss_home
+DEFAULT_VAULT_KEYS = _moss_home() / "seed-vault"
 
 B, DIM, RST = "\033[1m", "\033[2m", "\033[0m"
 
@@ -463,6 +473,37 @@ async def cmd_trust(args) -> int:
     return 0
 
 
+def cmd_menu(args) -> int:
+    from . import menu
+    return menu.main()
+
+
+def cmd_setup(args) -> int:
+    from . import setup
+    return setup.main_from_args(args)
+
+
+def cmd_update(args) -> int:
+    from . import updater
+    try:
+        updater.update(args.branch)
+    except updater.UpdateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+async def cmd_radio_check(args) -> int:
+    from . import radiocheck
+    if args.action == "send":
+        await radiocheck.send(args.port, args.count, args.gap)
+    elif args.action == "listen":
+        await radiocheck.listen(args.port, args.seconds)
+    else:
+        await radiocheck.info(args.port)
+    return 0
+
+
 async def cmd_web(args) -> int:
     from . import web
     async with connect(args) as (client, info):
@@ -475,14 +516,20 @@ async def cmd_web(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="moss", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    from . import config
+    saved = config.load()                    # what `moss setup` remembered; flags still win
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--port", help="serial port of your radio (auto-picked if only one)")
+    common.add_argument("--port", default=saved.get("port"),
+                        help="serial port of your radio (default: the one setup saved, "
+                             "else auto-picked if only one)")
     common.add_argument("--baud", type=int, default=115200)
-    common.add_argument("--channel-name", default="#moss",
+    common.add_argument("--channel-name", default=saved.get("channel") or "#moss",
                         help="the hashtag channel MOSS uses (default #moss); found or created on the radio")
-    common.add_argument("--scope", help="MeshCore region to keep flooded traffic inside "
+    common.add_argument("--scope", default=saved.get("scope"), help="MeshCore region to keep flooded traffic inside "
                                         "(e.g. a name your local repeaters use; needs firmware 1.12+)")
     common.add_argument("--data-type", type=lambda s: int(s, 0), default=P.MOSS_DATA_TYPE)
+    common.add_argument("--debug", action="store_true",
+                        help="print everything the MeshCore library does (for diagnosing radio trouble)")
     # Old flags, still accepted so existing setups (like the Pi's service) keep working.
     common.add_argument("--channel", type=int, help=argparse.SUPPRESS)
     common.add_argument("--yes-really-public", action="store_true", help=argparse.SUPPRESS)
@@ -509,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument("--max-bytes", type=int, default=0,
                      help="shorten articles to about this many bytes (default 0 = full articles)")
 
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")       # no command: the menu
 
     g = sub.add_parser("gateway", parents=[common], help="run the Seed Vault: answer requests from a .zim, Wikipedia or a folder")
     g.add_argument("--source", default="wikipedia",
@@ -583,14 +630,53 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--link-searches", action="store_true",
                    help="also link titles that only appeared in search results")
     x.set_defaults(fn=cmd_export)
+
+    from .pages_cli import add_parsers
+    add_parsers(sub)
+
+    m = sub.add_parser("menu", help="the interactive menu (same as plain `moss`)")
+    m.set_defaults(fn=cmd_menu)
+
+    st = sub.add_parser("setup", help="set this machine up as a reader or a Seed Vault")
+    st.add_argument("--role", choices=["reader", "vault"])
+    st.add_argument("--port", help="the radio's port (asked if left out)")
+    st.add_argument("--zim", help="Seed Vault: the .zim library (asked if left out)")
+    st.add_argument("--branch", choices=["main", "experimental"], help="which branch `moss update` follows")
+    st.add_argument("--yes", action="store_true", help="don't ask anything; use what's given or saved")
+    st.add_argument("--no-service", action="store_true", help="Seed Vault: don't install the background service")
+    st.set_defaults(fn=cmd_setup)
+
+    up = sub.add_parser("update", help="get the newest MOSS from GitHub")
+    up.add_argument("--branch", choices=["main", "experimental"],
+                    help="switch to this branch (remembered); default: the one you follow now")
+    up.set_defaults(fn=cmd_update)
+
+    rc = sub.add_parser("radio-check", parents=[common],
+                        help="send or listen for pings on #moss to test range (pauses a Seed Vault)")
+    rc.add_argument("action", choices=["send", "listen", "info"])
+    rc.add_argument("--count", type=int, default=10)
+    rc.add_argument("--gap", type=float, default=3.0, help="seconds between pings")
+    rc.add_argument("--seconds", type=float, default=300, help="how long to listen")
+    rc.set_defaults(fn=cmd_radio_check)
     return ap
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.cmd is None:
+        args.fn = cmd_menu
+    from .pages_cli import fix_args
+    fix_args(args)
+    if getattr(args, "debug", False):
+        import logging
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
+                            format="%(asctime)s %(name)s %(levelname)s %(message)s")
+        logging.getLogger("meshcore").setLevel(logging.DEBUG)
     if getattr(args, "max_bytes", None) == 0:
         args.max_bytes = None
     try:
+        if not inspect.iscoroutinefunction(args.fn):   # menu, setup, update: ask questions
+            raise SystemExit(args.fn(args))
         raise SystemExit(asyncio.run(args.fn(args)))
     except KeyboardInterrupt:
         print("\nstopped", file=sys.stderr)

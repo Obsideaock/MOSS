@@ -6,3 +6,6 @@ pyserial>=3.5
 pycryptodome>=3.24
 # For trying it without radios: `python -m moss web --sim some.zim`
 libzim>=3.6
+# The setup menu (moss with no arguments)
+questionary>=2.0
+rich>=13.0

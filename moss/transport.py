@@ -128,6 +128,8 @@ class MeshCoreTransport:
     POLL_TIMEOUT = 4.0        # seconds to wait for the radio to answer a poll
     SEND_WAIT = 20.0          # how long a send waits for a reconnect before giving up
     RETRY_DELAY = 2.0         # first pause between reopen attempts (grows to 10 s)
+    SEND_TRIES = 3            # attempts per datagram when the radio refuses it
+    STUCK_AFTER = 6           # datagrams in a row the radio refused: reconnect
 
     def __init__(self, port: str, baud: int, channel_name: str = "#moss",
                  data_type: int = MOSS_DATA_TYPE, poll_interval: float = 1.0,
@@ -139,6 +141,7 @@ class MeshCoreTransport:
         self.scoped = False
         self.auto_port = auto_port
         self.handlers: list[Handler] = []
+        self.text_handlers: list = []         # plain chat messages on #moss (radio check)
         self.mc = None
         self.state = "connecting"            # connecting, connected, reconnecting, closed
         self.reconnects = 0
@@ -147,6 +150,12 @@ class MeshCoreTransport:
         self._lost = asyncio.Event()
         self._task: asyncio.Task | None = None
         self.log = log or (lambda m: None)
+        # One command at a time on the serial link, so a send's answer can't be
+        # mistaken for a poll's (both listen for the radio's error reply).
+        self._cmd = asyncio.Lock()
+        self.refused = 0                      # datagrams the radio refused to send
+        self._refused_streak = 0
+        self.lost_reason = ""
 
     @classmethod
     async def open(cls, port: str | None, baud: int, channel_name: str = "#moss",
@@ -202,6 +211,9 @@ class MeshCoreTransport:
                          f"sending unscoped (needs MeshCore 1.12+)")
         mc.subscribe(EventType.CHANNEL_DATA_RECV, self._on_event)
         mc.subscribe(EventType.DISCONNECTED, self._on_disconnect)
+        text_kind = getattr(EventType, "CHANNEL_MSG_RECV", None)
+        if text_kind is not None:
+            mc.subscribe(text_kind, self._on_text)
         self.mc = mc
         self._lost.clear()
         self.state = "connected"
@@ -218,8 +230,32 @@ class MeshCoreTransport:
                 pass
         await asyncio.sleep(0.3)
 
-    async def _on_disconnect(self, event) -> None:
+    def _lose(self, reason: str) -> None:
+        if not self._lost.is_set():
+            self.lost_reason = reason
         self._lost.set()
+
+    async def _on_disconnect(self, event) -> None:
+        p = getattr(event, "payload", None)
+        why = p.get("reason") if isinstance(p, dict) else None
+        self._lose(f"the radio's connection closed ({why or 'disconnect'})")
+
+    async def _alive(self) -> bool:
+        """Polls can go unanswered on a healthy radio: the library can't parse
+        some message types (newer firmware, other people's traffic), and a
+        poll for one of those simply times out. So before declaring the link
+        dead, ask the radio something that always gets a reply."""
+        mc = self.mc
+        if mc is None:
+            return False
+        try:
+            async with self._cmd:
+                ev = await asyncio.wait_for(mc.commands.send_device_query(), self.POLL_TIMEOUT + 2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return getattr(ev, "type", None) not in (None, self._EventType.ERROR)
 
     async def _supervise(self) -> None:
         while True:
@@ -227,10 +263,12 @@ class MeshCoreTransport:
             if self.state == "closed":
                 return
             self.state = "reconnecting"
-            self.log("radio link lost; reconnecting (sleep, unplugged cable, or a busy port)")
+            self.log(f"radio link lost: {self.lost_reason or 'unknown reason'}. Reconnecting...")
             await self._detach()
             delay = self.RETRY_DELAY
+            tries = 0
             while self.state != "closed":
+                tries += 1
                 try:
                     if self.auto_port:
                         try:
@@ -248,7 +286,10 @@ class MeshCoreTransport:
                     await self._detach()
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, 10.0)
-                except Exception:
+                except Exception as exc:
+                    if tries == 1 or tries % 5 == 0:
+                        self.log(f"still can't reopen {self.port} (try {tries}): "
+                                 f"{type(exc).__name__}: {exc}")
                     await self._detach()
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, 10.0)
@@ -259,14 +300,20 @@ class MeshCoreTransport:
         while not self._lost.is_set():
             mc = self.mc
             if mc is None or not getattr(mc, "is_connected", True):
+                self._lose("the serial connection closed")
                 return
             try:
-                result = await mc.commands.get_msg(timeout=self.POLL_TIMEOUT)
+                async with self._cmd:
+                    result = await mc.commands.get_msg(timeout=self.POLL_TIMEOUT)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 misses += 1
                 if misses >= self.DEAD_AFTER:
+                    if await self._alive():
+                        misses = 0
+                        continue
+                    self._lose(f"polling the radio failed {misses} times ({type(exc).__name__}: {exc})")
                     return
                 await asyncio.sleep(self._poll_interval)
                 continue
@@ -274,8 +321,13 @@ class MeshCoreTransport:
             payload = getattr(result, "payload", None)
             if kind == self._EventType.ERROR and isinstance(payload, dict) \
                     and payload.get("reason") == "no_event_received":
-                misses += 1                   # the radio didn't answer at all
+                misses += 1                   # no answer we could read
                 if misses >= self.DEAD_AFTER:
+                    if await self._alive():   # it answers other questions: it's fine
+                        misses = 0
+                        await asyncio.sleep(self._poll_interval)
+                        continue
+                    self._lose(f"the radio stopped answering ({misses} polls and a status check)")
                     return
                 continue
             misses = 0
@@ -284,20 +336,75 @@ class MeshCoreTransport:
 
     # ------------------------------------------------------------ the Transport interface
     async def send(self, datagram: bytes) -> None:
+        """Hand one datagram to the radio. The radio can *refuse* (its queue is
+        full, or it's busy): that comes back as an error reply, not an
+        exception, and used to be silently ignored, so a reader could keep
+        asking for a lost capsule without a single ask leaving the laptop.
+        Now a refusal is retried, logged, and if the radio keeps refusing,
+        the link is treated as stuck and reopened."""
+        reason = None
+        for attempt in range(1, self.SEND_TRIES + 1):
+            if not self._up.is_set():
+                try:
+                    await asyncio.wait_for(self._up.wait(), self.SEND_WAIT)
+                except asyncio.TimeoutError:
+                    return                    # lost in the air; the protocol repeats it
+            try:
+                async with self._cmd:
+                    ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
+                                                                  datagram)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._lose(f"writing to the radio failed ({type(exc).__name__}: {exc})")
+                return
+            if getattr(ev, "type", None) != self._EventType.ERROR:
+                self._refused_streak = 0
+                return
+            reason = getattr(ev, "payload", None)
+            await asyncio.sleep(0.4 * attempt)
+        self.refused += 1
+        self._refused_streak += 1
+        self.log(f"the radio refused to send a message {self.SEND_TRIES} times ({reason}); "
+                 f"it counts as lost")
+        if self._refused_streak >= self.STUCK_AFTER:
+            self._refused_streak = 0
+            self._lose(f"the radio refused {self.STUCK_AFTER} messages in a row")
+
+    def subscribe(self, handler: Handler) -> None:
+        self.handlers.append(handler)
+
+    # ------------------------------------------------------------ plain chat (radio check only)
+    def subscribe_text(self, handler) -> None:
+        """handler(text, info) for ordinary chat messages heard on #moss;
+        info may hold SNR and RSSI."""
+        self.text_handlers.append(handler)
+
+    async def _on_text(self, event) -> None:
+        p = event.payload if isinstance(event.payload, dict) else {}
+        if p.get("channel_idx", self.channel) != self.channel:
+            return
+        for h in list(self.text_handlers):
+            result = h(p.get("text", ""), p)
+            if inspect.isawaitable(result):
+                await result
+
+    async def send_text(self, text: str) -> bool:
+        """Send an ordinary chat message on #moss. True if the radio took it."""
         if not self._up.is_set():
             try:
                 await asyncio.wait_for(self._up.wait(), self.SEND_WAIT)
             except asyncio.TimeoutError:
-                return                        # lost in the air; the protocol repeats it
-        try:
-            await self.mc.commands.send_channel_data(self.channel, self.data_type, datagram)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._lost.set()                  # a failed write means the link is gone
+                return False
+        async with self._cmd:
+            ev = await self.mc.commands.send_chan_msg(self.channel, text)
+        return getattr(ev, "type", None) != self._EventType.ERROR
 
-    def subscribe(self, handler: Handler) -> None:
-        self.handlers.append(handler)
+    def radio_info(self) -> dict:
+        """What the radio said about itself: name, frequency, SF, BW, CR, power."""
+        mc = self.mc
+        info = getattr(mc, "self_info", None) if mc is not None else None
+        return dict(info) if isinstance(info, dict) else {}
 
     async def _on_event(self, event) -> None:
         p = event.payload if isinstance(event.payload, dict) else {}

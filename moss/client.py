@@ -101,6 +101,8 @@ class _Exchange:
         self.manifest: dict | None = None
         self.chunks: dict[int, bytes] = {}
         self.status: tuple[int, int] | None = None     # (state, value)
+        self.status_at = time.monotonic()              # when the latest pulse changed
+        self.bad_capsules = 0           # capsules for us that wouldn't open
         self.error: str | None = None
         self.last_heard = time.monotonic()
         self.orphans = 0                # chunks heard for us since the last re-ask, no manifest yet
@@ -161,7 +163,8 @@ class _Exchange:
             try:
                 m = self.seal.open_capsule(raw) if self.seal else P.parse_manifest(raw)
             except (S.SealError, ValueError, IndexError):
-                return                  # not ours, or tampered with
+                self.bad_capsules += 1  # not ours (same transfer number), or tampered with
+                return
             if self.manifest is None:
                 self.manifest = m
                 # Adopt what arrived while the manifest was missing.
@@ -186,6 +189,8 @@ class _Exchange:
                 self.feed_preview()
         elif kind == P.STATUS:
             _, state, value = P.parse_status(raw)
+            if self.status != (state, value):
+                self.status_at = time.monotonic()
             self.status = (state, value)
         elif kind == P.ERROR and self.seal is None:
             self.error = P.parse_error(raw)[1] or "the Seed Vault refused the request"
@@ -351,7 +356,7 @@ class Requester:
                 state, value = ex.status
                 if state == P.ST_SENDING:
                     gateway_eta = float(value)
-                    last_status_at = ex.last_heard
+                    last_status_at = ex.status_at   # count down from the pulse itself
                 # Chunks are flying past but the manifest never reached us:
                 # ask again; the gateway answers a repeat by re-sending it.
                 # If the chunks have stopped and the re-sent manifest was lost
