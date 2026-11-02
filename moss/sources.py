@@ -110,10 +110,20 @@ class LocalSource:
 
     @staticmethod
     def _blurb(text: str) -> str:
+        """The first sentence of the first paragraph, without markup."""
+        in_block = False
         for line in text.splitlines():
             line = line.strip()
-            if line and not line.startswith(("#", "*", "|")):
-                return line[:90]
+            if line.startswith(":::"):
+                in_block = line != ":::"
+                continue
+            if in_block or not line or line.startswith(("#", "|", "- ", "* ", ">", "*Source:")):
+                continue
+            line = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]", r"\1", line)   # [[a|b]] -> b
+            line = re.sub(r"(?<!\\)[*_`]", "", line).replace("$", "")
+            m = re.match(r"(.+?[.!?])(\s|$)", line)
+            line = m.group(1) if m else line
+            return line if len(line) <= 120 else line[:119].rstrip() + "…"
         return ""
 
     async def search(self, query: str) -> list[SearchResult]:

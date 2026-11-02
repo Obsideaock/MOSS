@@ -41,7 +41,9 @@ MAX_BYTES = 40_000
 
 # Root fingerprints of well-known original vaults -> how readers label them.
 # The ATLAS vault's goes here once its owner has made its print.
-KNOWN_ORIGINALS: dict[str, str] = {}
+KNOWN_ORIGINALS: dict[str, str] = {
+    "00B2-ACDE-637D-7729": "ATLAS, CU Boulder",          # the first Seed Vault, since 2026-11-02
+}
 
 
 class PrintError(Exception):
@@ -148,20 +150,22 @@ def summary(sp: dict) -> dict:
     """What readers are shown (all of it public)."""
     root = sp["root"]
     origin = fingerprint(bytes.fromhex(root["x"]), bytes.fromhex(root["key"]))
-    chain = [root["name"]] + [link["name"] for link in sp["links"]]
+    known = KNOWN_ORIGINALS.get(origin, "")
+    chain = [known or root["name"]] + [link["name"] for link in sp["links"]]
     since = sp["links"][-1]["time"] if sp["links"] else root["time"]
     return {"hops": len(sp["links"]), "note": root["note"], "origin": origin,
-            "known": KNOWN_ORIGINALS.get(origin, ""), "chain": chain,
+            "known": known, "chain": chain,
             "since": time.strftime("%Y-%m-%d", time.gmtime(since))}
 
 
 def describe(s: dict) -> str:
     """One readable line from summary()."""
-    who = s["known"] or s["note"]
     if s["hops"] == 0:
-        return f"the original: {who} ({s['origin']}), since {s['since']}"
+        who = f"the original Seed Vault at {s['known']}" if s["known"] else f"an original: {s['note']}"
+        return f"{who} ({s['origin']}), since {s['since']}"
     hops = f"{s['hops']} hop{'s' if s['hops'] != 1 else ''}"
-    return f"{hops} from the original ({who}): {' → '.join(s['chain'])}, since {s['since']}"
+    whence = f"the original Seed Vault at {s['known']}" if s["known"] else f"an original ({s['note']})"
+    return f"{hops} from {whence}: {' → '.join(s['chain'])}, since {s['since']}"
 
 
 # ---------------------------------------------------------------- where it's kept

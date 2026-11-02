@@ -538,7 +538,7 @@ def vault_menu() -> None:
 
     def extra():
         ui.note("Extra options for the gateway, e.g.  --gap 0.5  --pad-sizes  --scope NAME  "
-                "(see README → Seed Vault options)")
+                "(see docs/seed-vault.md → Seed Vault options)")
         e = ui.text("Extra options:", service.read_env().get("MOSS_EXTRA", ""))
         if re.search(r"[;&|`$<>]", e):
             ui.fail("options only, please (no shell symbols)")

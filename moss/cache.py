@@ -44,7 +44,11 @@ class CachedArticle:
 
 class Cache:
     def __init__(self, folder: str | Path | None = None):
-        self.folder = Path(folder) if folder else DEFAULT_DIR
+        if folder:
+            self.folder = Path(folder)
+        else:
+            from .config import moss_home         # honours MOSS_HOME, like everything else
+            self.folder = moss_home() / "cache"
         self.articles = self.folder / "articles"
         self._index_path = self.folder / "index.json"
         self._search_path = self.folder / "searches.json"

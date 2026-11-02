@@ -50,7 +50,7 @@ cat <<MSG
 Done. Next:
   1. Plug in the KIWIX USB stick; check MOSS_ZIM in the settings matches where
      the .zim shows up (default /media/moss/KIWIX/...). For it to mount at boot
-     with nobody logged in, see "USB stick" in README.md.
+     with nobody logged in, see "USB stick" in docs/seed-vault.md.
   2. Find the radio:   ls -l /dev/serial/by-id/
   3. Edit settings:    sudo nano /etc/moss/gateway.env
   4. Try it by hand:   $REPO/.venv/bin/python -m moss gateway --source /media/moss/KIWIX/<file>.zim --port <port>

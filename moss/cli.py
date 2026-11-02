@@ -606,9 +606,15 @@ def describe_specs(specs: dict) -> list[str]:
 
 def cmd_spore_print(args) -> int:
     """On the Seed Vault: show its spore print, or start the original one."""
+    from . import config
     from . import sporeprint as SP
-    keys = S.VaultKeys.load_or_create(args.keys or DEFAULT_VAULT_KEYS)
-    vp = SP.VaultPrint(Path(args.keys or DEFAULT_VAULT_KEYS))
+    folder = Path(args.keys or DEFAULT_VAULT_KEYS).expanduser()
+    if config.load().get("role") != "vault" and not (folder / "ed25519.pem").exists():
+        print("this machine isn't a Seed Vault, so it has no spore print of its own. (Readers "
+              "carry vaults' prints for you automatically; see: moss vault-info)", file=sys.stderr)
+        return 1
+    keys = S.VaultKeys.load_or_create(folder)
+    vp = SP.VaultPrint(folder)
     if args.note:
         try:
             sp = vp.start_original(keys, " ".join(args.note))

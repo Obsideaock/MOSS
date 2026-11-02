@@ -225,7 +225,7 @@ class SporePrintTests(unittest.TestCase):
         SP.verify(two)
         s = SP.summary(two)
         self.assertEqual((s["hops"], s["chain"]), (2, ["ATLAS Seed Vault", "Lafayette", "Longmont"]))
-        self.assertIn("2 hops from the original", SP.describe(s))
+        self.assertIn("2 hops from an original", SP.describe(s))
 
     def test_forgeries_are_refused(self):
         root = SP.make_root(self.atlas, "The original")
@@ -296,6 +296,26 @@ class SporePrintTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- routing and the dedicated link
+
+class KnownOriginalTests(unittest.TestCase):
+    def test_atlas_is_labelled(self):
+        self.assertIn("00B2-ACDE-637D-7729", SP.KNOWN_ORIGINALS)
+
+    def test_spore_print_refused_on_a_reader(self):
+        import io, os, contextlib
+        from unittest import mock
+        from moss import config
+        from moss.cli import main
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"MOSS_HOME": home}):
+            config.update(role="reader")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as done:
+                main(["spore-print", "--keys", str(Path(home) / "seed-vault"), "An original"])
+            self.assertEqual(done.exception.code, 1)
+            self.assertIn("isn't a Seed Vault", err.getvalue())
+            self.assertFalse((Path(home) / "seed-vault").exists(), "made no keys")
+
 
 class RoutingTests(unittest.TestCase):
     def setUp(self):
