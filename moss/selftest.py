@@ -6,12 +6,13 @@
 It does what a person would, over the air, and checks each answer:
 
     1. the Seed Vault answers a search
-    2. a test page uploads
-    3. it reads back by its address, signature checked, text identical
-    4. a new version uploads
-    5. the new version reads back
-    6. the old version is refused when sent again (no replays)
-    7. the page is deleted, and reads back as deleted
+    2. it describes itself: same MOSS version, free storage
+    3. a test page uploads
+    4. it reads back by its address, signature checked, text identical
+    5. a new version uploads
+    6. the new version reads back
+    7. the old version is refused when sent again (no replays)
+    8. the page is deleted, and reads back as deleted
 
 The test page is unlisted and comes from a throwaway anonymous identity, so
 it never shows up in search or near your own pages; step 7 deletes it. It
@@ -67,6 +68,18 @@ async def run(client: MossClient, out: Out = print, query: str = "Colorado") -> 
                 return f"answered (nothing found for {query!r})"
             raise
 
+    async def specs():
+        from . import PROTOCOL
+        share, client.share_prints = client.share_prints, False     # no print trading in a test
+        try:
+            info = await client.specs()
+        finally:
+            client.share_prints = share
+        assert int(info.get("protocol", 0)) >= PROTOCOL, \
+            f"the vault runs MOSS {info.get('moss', '?')}; this reader needs the same: moss update on the Pi"
+        room = info.get("storage") or {}
+        return f"MOSS {info.get('moss')}, {room.get('free_mb', '?')} MB free for community pages"
+
     async def upload(version_text, label):
         page = who.sign(name, version_text, visibility=PG.UNLISTED)
         state[label] = page
@@ -100,6 +113,7 @@ async def run(client: MossClient, out: Out = print, query: str = "Colorado") -> 
 
     out(f"self-test page: moss:{who.id}/{name} (unlisted, throwaway identity)")
     ok = (await step("the Seed Vault answers a search", search)
+          and await step("the Seed Vault describes itself", specs)
           and await step("upload a test page", lambda: upload(text1, "v1"))
           and await step("read it back by its address", lambda: read(state["v1"]))
           and await step("upload a new version", lambda: upload(text2, "v2"))
@@ -108,5 +122,5 @@ async def run(client: MossClient, out: Out = print, query: str = "Colorado") -> 
           and await step("delete it, and it reads back as deleted", delete))
     total = sum(r[3] for r in results)
     out("")
-    out(f"{'ALL PASSED' if ok else 'FAILED'}: {sum(r[1] for r in results)}/7 steps in {total:.0f}s")
+    out(f"{'ALL PASSED' if ok else 'FAILED'}: {sum(r[1] for r in results)}/8 steps in {total:.0f}s")
     return ok

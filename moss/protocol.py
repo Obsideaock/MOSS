@@ -37,8 +37,11 @@ NACK_ROOM = (MAX_DATAGRAM - 4) // 2           # indices per NACK datagram
 FLAG_ZLIB = 1
 
 KIND_SEARCH, KIND_ARTICLE, KIND_PAGE, KIND_UPLOAD = 1, 2, 3, 4
+KIND_SPECS, KIND_SEARCH_ALL, KIND_PRINT = 5, 6, 7
 KIND_NAMES = {KIND_SEARCH: "search", KIND_ARTICLE: "article",
-              KIND_PAGE: "community page", KIND_UPLOAD: "upload"}
+              KIND_PAGE: "community page", KIND_UPLOAD: "upload",
+              KIND_SPECS: "vault specs", KIND_SEARCH_ALL: "search", KIND_PRINT: "spore print"}
+PRINT_OFFER = "spore-print"     # the address in an upload offer that carries a spore print
 
 ST_QUEUED, ST_FETCHING, ST_SENDING = 1, 2, 3
 

@@ -11,6 +11,7 @@ the command line always wins over the saved value.
     pin       Bluetooth pairing PIN, if the radio needs one
     channel   the hashtag channel, #moss unless changed
     scope     MeshCore region to keep flooded traffic inside, or null
+    route     send bulk traffic along the learned route instead of flooding (opt-in)
     branch    which GitHub branch `moss update` follows: main or experimental
 """
 
@@ -21,7 +22,7 @@ import os
 from pathlib import Path
 
 DEFAULTS = {"role": None, "port": None, "ble": None, "pin": None, "channel": "#moss",
-            "scope": None, "branch": "main"}
+            "scope": None, "branch": "main", "route": False}
 
 
 def radio_label(cfg: dict) -> str:

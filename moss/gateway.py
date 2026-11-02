@@ -19,10 +19,12 @@ SRESULT. Uploads wait in the same queue as reads.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import zlib
 
 from . import pages as PG
+from . import sporeprint as SP
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -59,6 +61,7 @@ class Session:
     utotal: int = 0
     uchunks: dict = field(default_factory=dict)
     poked: bool = False                 # the reader re-sent its request mid-upload
+    route: bytes | None = None          # route back to the reader (routing on), else flood
     final: bytes | None = None          # our SRESULT, repeated if it was lost
 
 
@@ -69,7 +72,7 @@ class Gateway:
                  pad_sizes: bool = False, log_queries: bool = False,
                  capsule_every: int = 50, pages=None, upload_quiet: float = 6.0,
                  upload_idle: float = 120.0, max_nacks: int = 14,
-                 nack_spacing: float = 1.0):
+                 nack_spacing: float = 1.0, library: str = "", spore_print=None):
         """gap     seconds between datagrams (airtime pacing)
         wait    how long to listen for NACK/DONE after the last chunk; must be
                 comfortably longer than the client's --quiet
@@ -96,6 +99,8 @@ class Gateway:
         self.keys, self.pad_sizes, self.log_queries = keys, pad_sizes, log_queries
         self.capsule_every = capsule_every
         self.pages = pages
+        self.library = library
+        self.spore_print = spore_print          # a sporeprint.VaultPrint, or None
         self.upload_quiet, self.upload_idle = upload_quiet, upload_idle
         self.max_nacks, self.nack_spacing = max_nacks, nack_spacing
         self._last_hello = 0.0
@@ -141,15 +146,18 @@ class Gateway:
         if not raw:
             return
         kind = raw[0]
+        route_of = getattr(self.tx, "return_path", None)
         try:
             if kind == P.REQUEST:
-                await self._on_request(*P.parse_request(raw))
+                await self._on_request(*P.parse_request(raw),
+                                       route=route_of(raw) if route_of else None)
             elif kind == S.SREQUEST and self.keys is not None:
                 try:
                     rid, k, query, sealed = self.keys.open_request(raw)
                 except S.SealError:
                     return                          # meant for another vault, or garbage
-                await self._on_request(rid, k, query, sealed)
+                await self._on_request(rid, k, query, sealed,
+                                       route=route_of(raw) if route_of else None)
             elif kind == S.WHOIS and self.keys is not None:
                 await self._hello(asked_by=raw[:3])
             elif kind == P.NACK:
@@ -197,7 +205,7 @@ class Gateway:
         return f"{P.KIND_NAMES[s.kind]}: {s.query!r}"
 
     async def _on_request(self, rid: int, kind: int, query: str,
-                          seal: "S.VaultSession | None" = None) -> None:
+                          seal: "S.VaultSession | None" = None, route: bytes | None = None) -> None:
         if kind not in P.KIND_NAMES or not query.strip():
             await self.tx.send(self._error(rid, "bad request", seal))
             return
@@ -227,13 +235,13 @@ class Gateway:
             refusal = None
             if seal is None:
                 refusal = "uploads must be encrypted"
-            elif self.pages is None:
+            elif self.pages is None and not query.startswith(P.PRINT_OFFER):
                 refusal = "this Seed Vault doesn't keep community pages"
             else:
                 try:
                     address, version, size = query.split()
                     offer = (address, int(version), int(size))
-                    refusal = self.pages.check_offer(*offer)
+                    refusal = self._check_offer(offer)
                 except ValueError:
                     refusal = "bad upload offer"
             if refusal:
@@ -247,7 +255,10 @@ class Gateway:
             await self.tx.send(self._error(rid, "Seed Vault busy, try again soon", seal))
             return
 
-        session = Session(rid, kind, query.strip(), seal=seal, offer=offer)
+        session = Session(rid, kind, query.strip(), seal=seal, offer=offer, route=route)
+        if route is not None:
+            self.log(f"[{rid}] route back known ({len(route)} hop{'s' if len(route) != 1 else ''}); "
+                     f"spores go that way instead of flooding")
         self.sessions[rid] = session
         self.log(f"[{rid}] {self._what(session)}")
         await self.queue.put(session)
@@ -303,7 +314,17 @@ class Gateway:
                 content = self.pages.get(s.query) if self.pages is not None else None
                 if content is None:
                     raise SourceError("this Seed Vault doesn't have a page at that address")
+                self.pages.count_download(s.query)
                 name = "page"
+            elif s.kind == P.KIND_SPECS:
+                name, content = "specs", json.dumps(self.specs()).encode()
+            elif s.kind == P.KIND_SEARCH_ALL:
+                name, content = "results", json.dumps(await self._search_all(s.query)).encode()
+            elif s.kind == P.KIND_PRINT:
+                sp = self.spore_print.get() if self.spore_print else None
+                if sp is None:
+                    raise SourceError("this Seed Vault has no spore print yet")
+                name, content = "spore print", SP.to_bytes(sp)
             else:
                 title, text = await self.source.article(s.query)
                 name, content = title, text.encode()
@@ -335,7 +356,7 @@ class Gateway:
                  f"({len(content)} -> {len(blob)} bytes{', encrypted' if s.seal else ''}), about {eta}s")
         await self.tx.send(P.build_status(s.rid, P.ST_SENDING, eta))
         await asyncio.sleep(self.gap)
-        await self.tx.send(s.manifest)
+        await self._send(s.manifest, s.route)
         await asyncio.sleep(self.gap)
         if self.capsule_every and len(s.chunks) > 1:
             await self.tx.send(s.manifest)        # twice: losing it costs a lot
@@ -352,7 +373,10 @@ class Gateway:
                 if full and rnd == 1 and self.capsule_every and n and n % self.capsule_every == 0:
                     await self.tx.send(s.manifest)    # for a reader that missed it
                     await asyncio.sleep(self.gap)
-                await self.tx.send(P.build_chunk(s.rid, index, s.chunks[index]))
+                # Routed for the first two rounds; if the reader still misses
+                # spores after that, the route may be bad: flood the rest.
+                await self._send(P.build_chunk(s.rid, index, s.chunks[index]),
+                                 s.route if rnd <= 2 else None)
                 await asyncio.sleep(self.gap)
 
             s.reported.clear()
@@ -390,12 +414,75 @@ class Gateway:
         self.log(f"[{s.rid}] paused after {self.rounds} rounds")
         s.paused = True
 
+    async def _send(self, raw: bytes, route: bytes | None) -> None:
+        if route is None:
+            await self.tx.send(raw)
+        else:
+            await self.tx.send(raw, path=route)
+
+    # ------------------------------------------------------------ specs and search
+
+    def specs(self) -> dict:
+        """What any reader may know about this vault. Nothing private: nothing
+        about readers, requests, unlisted pages or who uploaded what."""
+        from . import PROTOCOL, __version__
+        out = {"name": self.keys.name if self.keys else "Seed Vault",
+               "fingerprint": self.keys.fingerprint if self.keys else "",
+               "moss": __version__, "protocol": PROTOCOL, "library": self.library,
+               "encrypted": self.keys is not None}
+        if self.pages is not None:
+            lim = self.pages.limits
+            out["community"] = {"public_pages": self.pages.public_count(),
+                                "uploads": lim.accept_uploads, "cap_spores": lim.cap_spores,
+                                "per_author_per_day": lim.per_author_per_day,
+                                "spores_per_day": lim.spores_per_day}
+            out["storage"] = self.pages.room()
+        sp = self.spore_print.get() if self.spore_print else None
+        out["spore_print"] = SP.summary(sp) if sp else None
+        return out
+
+    async def _search_all(self, query: str) -> dict:
+        """Wikipedia and community results together. Query: '<offset>\x1f<text>'."""
+        offset, _, text = query.partition("\x1f") if "\x1f" in query else ("0", "", query)
+        offset = int(offset) if offset.isdigit() else 0
+        wiki = []
+        if offset == 0 and not text.lower().startswith("author:"):
+            try:
+                wiki = [[r.title, r.blurb] for r in await self.source.search(text)]
+            except SourceError:
+                wiki = []
+        community, more = (self.pages.search(text, offset) if self.pages is not None else ([], False))
+        if not wiki and not community and offset == 0:
+            raise SourceError("nothing found")
+        return {"wiki": wiki, "community": community, "more": more}
+
     # ------------------------------------------------------------ uploads
+
+    def _check_offer(self, offer: tuple[str, int, int]) -> str | None:
+        address, version, size = offer
+        if address == P.PRINT_OFFER:
+            if self.spore_print is None or self.keys is None:
+                return "this Seed Vault doesn't take spore prints"
+            if self.spore_print.get() is not None:
+                return "this Seed Vault already has a spore print"
+            return None if 0 < size <= SP.MAX_BYTES else "spore print too big"
+        return self.pages.check_offer(address, version, size)
+
+    def _store_upload(self, data: bytes, offer: tuple[str, int, int]) -> tuple[str, str]:
+        """(message to the reader, line for the log). Raises PageError/PrintError."""
+        address, version, size = offer
+        if address == P.PRINT_OFFER:
+            msg = self.spore_print.offered(data, self.keys)
+            return msg, f"spore print: {msg}"
+        page = self.pages.store(data, address, version, size)
+        return (f"stored v{page.version}",
+                f"stored a community page ({'deletion, ' if page.deleted else ''}"
+                f"{-(-(size + S.TAG) // P.CHUNK_BYTES)} spores)")
 
     async def _receive_upload(self, s: Session) -> None:
         """The reader sends, we repair: the client's loop, mirrored."""
         address, version, size = s.offer
-        refusal = self.pages.check_offer(address, version, size)   # things may have changed
+        refusal = self._check_offer(s.offer)              # things may have changed
         if refusal:
             s.error_reply = self._error(s.rid, refusal, s.seal)
             await self.tx.send(s.error_reply)
@@ -450,14 +537,13 @@ class Gateway:
         wire = b"".join(s.uchunks[i] for i in range(s.utotal))[:wire_len]
         try:
             data = s.seal.open_upload(s.upload_key, wire)
-            page = self.pages.store(data, address, version, size)
-            stored, message = True, f"stored v{page.version}"
-            self.log(f"[{s.rid}] stored a community page "
-                     f"({'deletion, ' if page.deleted else ''}{s.utotal} spores){what}")
+            message, logline = self._store_upload(data, s.offer)
+            stored = True
+            self.log(f"[{s.rid}] {logline}{what}")
         except S.SealError:
             stored, message = False, "the page was damaged on the way; try again"
             self.log(f"[{s.rid}] upload damaged in transit")
-        except PG.PageError as exc:
+        except (PG.PageError, SP.PrintError) as exc:
             stored, message = False, str(exc)
             self.log(f"[{s.rid}] upload refused: {exc}")
         s.final = s.seal.upload_result(s.upload_key, stored, message)

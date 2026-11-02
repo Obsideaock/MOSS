@@ -9,13 +9,24 @@ author's signature, not the vault's word. A deletion is stored too (a signed
 
 The upload ledger keeps only today's and yesterday's counts per author id;
 there's no history of who uploaded what beyond what the limits need.
+
+Search (public pages only; unlisted ones are never indexed or counted):
+    score = 10 x text match + 3 x link score + log(1 + downloads) + 1 if recent
+The link score works like Google's original PageRank, made hard to game:
+links count once per distinct *other* author, and each linking author
+weighs more the more other authors link to them. Downloads are a plain
+count per public page (no who, no when).
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import math
 import os
+import re
+import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -40,6 +51,7 @@ class PageStore:
         self.limits = limits or Limits()
         self._today = today or (lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"))
         self.folder.mkdir(parents=True, exist_ok=True)
+        self._index: list[dict] | None = None
 
     # ------------------------------------------------------------ reading
     def _path(self, address: str) -> Path:
@@ -146,7 +158,121 @@ class PageStore:
         tmp.write_bytes(data)
         os.replace(tmp, path)
         self._record(PG.parse_address(address)[0], upload_spores(size))
+        self._index = None
         return page
+
+    # ------------------------------------------------------------ counts and room
+    def _counts_path(self) -> Path:
+        return self.folder / "downloads.json"
+
+    def downloads(self) -> dict:
+        try:
+            d = json.loads(self._counts_path().read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def count_download(self, address: str) -> None:
+        """One more download of a public page. Unlisted pages are never counted."""
+        page = self.get_page(address)
+        if page is None or page.record["visibility"] != PG.PUBLIC or page.deleted:
+            return
+        d = self.downloads()
+        d[address] = int(d.get(address, 0)) + 1
+        tmp = self._counts_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        os.replace(tmp, self._counts_path())
+        if self._index is not None:
+            for row in self._index:
+                if row["address"] == address:
+                    row["downloads"] += 1
+
+    def room(self) -> dict:
+        """Free space, for vault specs: room left under the cap and on the disk."""
+        used = self.used_bytes()
+        disk = shutil.disk_usage(self.folder).free
+        return {"used_mb": round(used / 1024 ** 2, 1),
+                "cap_mb": round(self.limits.storage_bytes / 1024 ** 2),
+                "free_mb": round(max(0, min(self.limits.storage_bytes - used, disk)) / 1024 ** 2, 1),
+                "disk_free_mb": round(disk / 1024 ** 2)}
+
+    def public_count(self) -> int:
+        return len(self._build())
+
+    # ------------------------------------------------------------ search
+    def _build(self) -> list[dict]:
+        if self._index is not None:
+            return self._index
+        rows = []
+        for page in self.all():
+            r = page.record
+            if page.deleted or r["visibility"] != PG.PUBLIC or r["lock"] is not None:
+                continue
+            try:
+                text = page.text()
+            except PG.PageError:
+                continue
+            aid = PG.parse_address(page.address)[0]
+            links = {m.group(0) for m in LINK.finditer(text)} - {page.address}
+            rows.append({"address": page.address, "author_id": aid, "title": r["title"],
+                         "author": r["author"], "fingerprint": page.fingerprint, "about": r["about"],
+                         "version": r["version"], "time": r["time"], "links": links,
+                         "words": _words(" ".join((r["title"], r["about"], r["author"], text))),
+                         "title_words": _words(r["title"]), "about_words": _words(r["about"]),
+                         "author_words": _words(r["author"])})
+        # Link score: distinct other authors linking in, each weighted by how
+        # many other authors link to *them*.
+        by_address = {row["address"]: row for row in rows}
+        linkers: dict[str, set[str]] = {a: set() for a in by_address}
+        for row in rows:
+            for target in row["links"]:
+                if target in by_address and by_address[target]["author_id"] != row["author_id"]:
+                    linkers[target].add(row["author_id"])
+        author_fans: dict[str, set[str]] = {}
+        for address, fans in linkers.items():
+            author_fans.setdefault(by_address[address]["author_id"], set()).update(fans)
+        weight = {a: 1 + math.log2(1 + len(f)) for a, f in author_fans.items()}
+        downloads = self.downloads()
+        for row in rows:
+            row["link_score"] = sum(weight.get(a, 1.0) for a in linkers[row["address"]])
+            row["downloads"] = int(downloads.get(row["address"], 0))
+        self._index = rows
+        return rows
+
+    def search(self, query: str, offset: int = 0, limit: int = 10,
+               now: float | None = None) -> tuple[list[dict], bool]:
+        """(results, more?) for public community pages. 'author:<id>' lists one author."""
+        rows = self._build()
+        now = now or time.time()
+        query = query.strip()
+        if query.lower().startswith("author:"):
+            aid = query.split(":", 1)[1].strip().lower()
+            hits = sorted((r for r in rows if r["author_id"] == aid), key=lambda r: -r["time"])
+        else:
+            terms = [t for t in _words(query) if len(t) > 1]
+            if not terms:
+                return [], False
+            scored = []
+            for r in rows:
+                text = sum(3 if t in r["title_words"] else 2 if t in r["about_words"]
+                           else 2 if t in r["author_words"] else 1 if t in r["words"] else 0
+                           for t in terms)
+                if text == 0:
+                    continue
+                score = (10 * text + 3 * r["link_score"] + math.log1p(r["downloads"])
+                         + (1 if now - r["time"] < 30 * 86400 else 0))
+                scored.append((score, r))
+            hits = [r for _, r in sorted(scored, key=lambda sr: (-sr[0], -sr[1]["time"]))]
+        page = hits[offset:offset + limit]
+        return [{"a": r["address"], "t": r["title"], "n": r["author"], "f": r["fingerprint"],
+                 "d": r["about"], "v": r["version"]} for r in page], len(hits) > offset + limit
+
+
+LINK = re.compile(r"moss:[a-z2-7]{26}/~?[a-z0-9-]{1,48}")
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
 def _yesterday(day: str) -> str:

@@ -346,7 +346,7 @@ class SelfTestTests(unittest.TestCase):
                 return ok, out
         ok, out = run(go(), 300)
         self.assertTrue(ok, "\n".join(out))
-        self.assertEqual(sum(1 for line in out if line.startswith("PASS")), 7)
+        self.assertEqual(sum(1 for line in out if line.startswith("PASS")), 8)
 
     def test_selftest_catches_a_vault_that_accepts_replays(self):
         async def go():
@@ -363,6 +363,23 @@ class SelfTestTests(unittest.TestCase):
         ok, out = run(go(), 300)
         self.assertFalse(ok)
         self.assertTrue(any(line.startswith("FAIL") and "old copy" in line for line in out), out)
+
+
+class OlderVaultTests(unittest.TestCase):
+    def test_a_vault_without_uploads_gets_a_clear_message(self):
+        async def go():
+            async with World() as w:
+                w.gateway.pages = None
+                real = dict(P.KIND_NAMES)
+                del P.KIND_NAMES[P.KIND_UPLOAD]           # what an older vault knows
+                try:
+                    page = w.author.sign("water-filters", long_text(30))
+                    with self.assertRaisesRegex(MossError, "older MOSS"):
+                        await w.client.upload(page.to_bytes())
+                finally:
+                    P.KIND_NAMES.clear()
+                    P.KIND_NAMES.update(real)
+        run(go())
 
 
 class OutboxTests(unittest.TestCase):

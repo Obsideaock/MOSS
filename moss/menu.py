@@ -353,13 +353,38 @@ def radio_menu() -> None:
         _run_async(radiocheck.info(port, out=ui.console.print))
         ui.pause()
 
+    def dedicated():
+        from . import radiocheck as RC
+        ui.note("A dedicated link puts MOSS radios on their own frequency, off the public mesh: "
+                "no load on other people's repeaters, but these radios then can't hear the public "
+                "mesh either. Every MOSS radio (vault and readers) needs the same settings.")
+        pick = ui.choose("Which settings?", [
+            ui.Choice("Back to the public mesh (MeshCore US: 910.525 MHz, 62.5 kHz, SF7, CR5)", "public"),
+            ui.Choice("Custom: enter frequency, bandwidth, spreading factor, coding rate", "custom")])
+        if pick == "public":
+            settings = RC.PUBLIC_US
+        else:
+            try:
+                settings = (float(ui.text("Frequency (MHz):", "915.0")), float(ui.text("Bandwidth (kHz):", "62.5")),
+                            int(ui.text("Spreading factor (5-12):", "7")), int(ui.text("Coding rate (5-8):", "5")))
+            except ValueError:
+                ui.fail("those need to be numbers")
+                return
+        for problem in RC.check_link(*settings):
+            ui.warn(problem)
+        if ui.confirm(f"Set this radio to {settings[0]:g} MHz, {settings[1]:g} kHz, SF{settings[2]}, "
+                      f"CR{settings[3]}?", False):
+            _run_async(RC.set_link(None, *settings, out=ui.console.print))
+        ui.pause()
+
     _loop(lambda: ui.header("Radio check",
                             "Send numbered pings on #moss from one radio and listen on the other. "
                             "They're short chat messages anyone on #moss can see.",
                             *(["The Seed Vault pauses during the check and starts again after."]
                               if config.load().get("role") == "vault" else [])),
           lambda: [("Listen for pings", listen), ("Send pings", send),
-                   ("Show this radio's settings", info)]
+                   ("Show this radio's settings", info),
+                   ("Dedicated link (own frequency, off the public mesh)", dedicated)]
           + ([] if config.load().get("role") == "vault" else
              [("Full test with the Seed Vault (search, upload, read back)",
                lambda: run_cli(["selftest"]))]))
@@ -436,7 +461,18 @@ def reader_menu() -> None:
                 ring.forget()
                 ui.ok("forgotten")
 
+        def routing():
+            on = config.load().get("route")
+            ui.note("Routing sends your uploads back along the route the Seed Vault's messages came "
+                    "by, so only the repeaters in between carry them instead of every repeater. "
+                    "It falls back to flooding whenever no route is known. (The vault decides "
+                    "for what it sends, with its own --route option.)")
+            if ui.confirm(f"Routing is {'on' if on else 'off'}. Turn it {'off' if on else 'on'}?", True):
+                config.update(route=not on)
+                ui.ok(f"routing {'off' if on else 'on'}")
+
         _loop(lambda: None, lambda: [("Radio (USB or Bluetooth)", port), ("Region scope", scope),
+                                     ("Routing instead of flooding (opt-in)", routing),
                                      ("Trusted Seed Vault", trust),
                                      ("Run the whole setup again", lambda: setup.run())])
 
@@ -444,6 +480,7 @@ def reader_menu() -> None:
         ("Open the reader in your browser", lambda: run_cli(["web"], wait=False)),
         ("Search from here", search),
         ("Open a page by address", open_by_address),
+        ("This Seed Vault (version, library, free storage, spore print)", lambda: run_cli(["vault-info"])),
         ("Read saved articles", saved),
         ("My pages", pages_menu),
         ("Identities", identities_menu),
@@ -508,6 +545,25 @@ def vault_menu() -> None:
             return
         _resave(extra=e)
 
+    def spore_print():
+        from . import sporeprint as SP
+        vp = SP.VaultPrint(config.moss_home() / "seed-vault")
+        sp = vp.get()
+        if sp:
+            ui.ok(SP.describe(SP.summary(sp)))
+            ui.note("A spore print never changes once a vault has one.")
+        else:
+            ui.note("No spore print yet. One arrives the first time a reader carrying one visits, "
+                    "or this vault can start an original family tree.")
+            if ui.confirm("Start an original spore print here? (Only the first vault of a family "
+                          "tree should; it can't be undone.)", False):
+                note = ui.text("Note for the original (public):",
+                               "The original Seed Vault, ATLAS, CU Boulder, Colorado")
+                run_cli(["spore-print", note], wait=False)
+                if service.is_active():
+                    service.control("restart")
+        ui.pause()
+
     _loop(head, lambda: [
         ("Recent log", status),
         ("Watch the log live", service.follow_log),
@@ -516,6 +572,7 @@ def vault_menu() -> None:
         ("Change library", library),
         ("Change radio port", port),
         ("Extra options", extra),
+        ("Spore print", spore_print),
         ("Update MOSS", do_update),
         ("Run the whole setup again", lambda: setup.run()),
     ])

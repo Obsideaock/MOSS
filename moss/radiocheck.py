@@ -136,3 +136,45 @@ async def listen(port, seconds: float = 300, out: Out = print,
 async def info(port, out: Out = print, pause_vault: bool | None = None) -> dict:
     async with radio(port, out, pause_vault) as tx:
         return {**tx.radio_info(), "slot": tx.channel}
+
+
+# ---------------------------------------------------------------- a dedicated link
+
+PUBLIC_US = (910.525, 62.5, 7, 5)        # MeshCore's recommended USA/Canada settings
+BANDWIDTHS = (7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0)
+
+
+def check_link(freq: float, bw: float, sf: int, cr: int) -> list[str]:
+    """Problems with these settings (empty if fine). Warnings start with 'note:'."""
+    problems = []
+    if bw not in BANDWIDTHS:
+        problems.append(f"bandwidth must be one of {', '.join(f'{b:g}' for b in BANDWIDTHS)} kHz")
+    if not 5 <= sf <= 12:
+        problems.append("spreading factor must be 5-12")
+    if not 5 <= cr <= 8:
+        problems.append("coding rate must be 5-8")
+    if not 150 <= freq <= 960:
+        problems.append("frequency must be in MHz, like 915.0")
+    elif not 902 <= freq <= 928:
+        problems.append("note: that's outside the US 902-928 MHz band; make sure it's legal where you are")
+    return problems
+
+
+async def set_link(link, freq: float, bw: float, sf: int, cr: int, out: Out = print) -> bool:
+    """Put this radio on these settings. Every MOSS radio that should hear it
+    needs the same four numbers, and on anything but the public settings it
+    no longer hears the public mesh."""
+    errors = [p for p in check_link(freq, bw, sf, cr) if not p.startswith("note:")]
+    if errors:
+        for e in errors:
+            out(e)
+        return False
+    async with radio(link, out) as tx:
+        ev = await tx.mc.commands.set_radio(freq, bw, sf, cr)
+        ok = getattr(ev, "type", None) != tx._EventType.ERROR
+        out(f"radio set to {freq:g} MHz, BW {bw:g} kHz, SF{sf}, CR{cr}" if ok
+            else "the radio refused those settings")
+        if ok:
+            out("some radios only switch after a restart: unplug it (or press reset) if the "
+                "radio check still shows the old settings")
+        return ok

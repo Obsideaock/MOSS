@@ -66,7 +66,7 @@ class SimTransport:
         self.closed = False
         self.drop_next: list = []      # predicates for deterministic loss in tests
 
-    async def send(self, datagram: bytes) -> None:
+    async def send(self, datagram: bytes, path: bytes | None = None) -> None:
         if len(datagram) > MAX_DATAGRAM:
             raise ValueError(f"datagram is {len(datagram)} bytes, max {MAX_DATAGRAM}")
         net = self.net
@@ -122,6 +122,14 @@ class MeshCoreTransport:
     ble="<address or name>" a particular one): same commands, same watchdog,
     just a different link to the radio.
 
+    Routing (opt-in, route=True): MeshCore floods channel messages through
+    every repeater. With routing on, MOSS watches the radio's packet log for
+    the route each flooded #moss message took (decrypting it with the
+    channel's public key to match it to the MOSS datagram inside), and a
+    reply can then be sent back along that route only: send(raw, path=...).
+    No route known, or a route with multi-byte repeater ids: it floods as
+    always. Uses only stock companion firmware features.
+
     MOSS talks on exactly one channel, #moss by default, found or created on
     the radio at every connect (see channel.py). Data arriving on any other
     channel is ignored. An optional flood *scope* (a MeshCore region name)
@@ -138,8 +146,13 @@ class MeshCoreTransport:
     def __init__(self, port: str, baud: int, channel_name: str = "#moss",
                  data_type: int = MOSS_DATA_TYPE, poll_interval: float = 1.0,
                  auto_port: bool = False, log: Callable[[str], None] | None = None,
-                 scope: str | None = None, ble: str | None = None, pin: str | None = None):
+                 scope: str | None = None, ble: str | None = None, pin: str | None = None,
+                 route: bool = False):
         self.port, self.baud, self.data_type = port, baud, data_type
+        self.route = route
+        self._heard_log: list[tuple[bytes, bytes]] = []      # (decrypted #moss packet, route) recent
+        self._routes: dict[bytes, bytes] = {}                # datagram digest -> route back
+        self.routed_sends = 0
         self.ble, self.pin = ble, pin          # ble None: USB serial
         self.radio_name = ""
         self.channel_name, self.scope = channel_name, scope
@@ -175,16 +188,19 @@ class MeshCoreTransport:
                    data_type: int = MOSS_DATA_TYPE,
                    log: Callable[[str], None] | None = None,
                    scope: str | None = None, ble: str | None = None,
-                   pin: str | None = None) -> "MeshCoreTransport":
+                   pin: str | None = None, route: bool = False) -> "MeshCoreTransport":
         from .channel import check_name
         check_name(channel_name)
         if ble is not None:
-            return await cls._open_ble(baud, channel_name, data_type, log, scope, ble, pin)
+            tx = await cls._open_ble(baud, channel_name, data_type, log, scope, ble, pin)
+            tx.route = route
+            return tx
         auto = port is None
         port = port or pick_port()
         if port.startswith("/") and not Path(port).exists():
             raise SystemExit(f"no such port: {port}\n{_port_listing()}")
-        tx = cls(port, baud, channel_name, data_type, auto_port=auto, log=log, scope=scope)
+        tx = cls(port, baud, channel_name, data_type, auto_port=auto, log=log, scope=scope,
+                 route=route)
         last = None
         for attempt in range(1, 7):
             try:
@@ -264,6 +280,11 @@ class MeshCoreTransport:
         text_kind = getattr(EventType, "CHANNEL_MSG_RECV", None)
         if text_kind is not None:
             mc.subscribe(text_kind, self._on_text)
+        log_kind = getattr(EventType, "RX_LOG_DATA", None)
+        if log_kind is not None:
+            from .channel import hashtag_secret
+            self._secret = hashtag_secret(self.channel_name)
+            mc.subscribe(log_kind, self._on_rx_log)
         self.mc = mc
         self._lost.clear()
         self.state = "connected"
@@ -385,7 +406,46 @@ class MeshCoreTransport:
             await asyncio.sleep(self._poll_interval if idle else 0.05)
 
     # ------------------------------------------------------------ the Transport interface
-    async def send(self, datagram: bytes) -> None:
+    # ------------------------------------------------------------ routing (opt-in)
+    async def _on_rx_log(self, event) -> None:
+        """Every packet the radio hears shows up in its log with the route it
+        took. Keep the routes of flooded #moss packets, decrypted, so the
+        datagram that arrives a moment later can be matched to its route."""
+        if not self.route:
+            return
+        p = event.payload if isinstance(event.payload, dict) else {}
+        try:
+            if p.get("payload_type") != 6 or p.get("route_type") not in (0, 1):    # GRP_DATA, flooded
+                return
+            if p.get("path_hash_size", 1) != 1:
+                return                                    # multi-byte repeater ids: just flood
+            body = p.get("pkt_payload") or b""
+            if isinstance(body, str):
+                body = bytes.fromhex(body)
+            plain = _open_group(self._secret, body)
+            if plain is None:
+                return                                    # another channel
+            path = bytes.fromhex(p.get("path") or "")
+            self._heard_log.append((plain, path))
+            del self._heard_log[:-64]
+        except (ValueError, TypeError, AttributeError):
+            return
+
+    def _remember_route(self, raw: bytes) -> None:
+        for plain, path in reversed(self._heard_log):
+            if raw in plain:
+                key = _digest(raw)
+                self._routes[key] = bytes(reversed(path))   # the way back is the way here, reversed
+                while len(self._routes) > 256:
+                    self._routes.pop(next(iter(self._routes)))
+                return
+
+    def return_path(self, raw: bytes) -> bytes | None:
+        """The route back to whoever sent this datagram, if routing is on and
+        it was learned; None means flood."""
+        return self._routes.get(_digest(raw)) if self.route else None
+
+    async def send(self, datagram: bytes, path: bytes | None = None) -> None:
         """Hand one datagram to the radio. The radio can *refuse* (its queue is
         full, or it's busy): that comes back as an error reply, not an
         exception, and used to be silently ignored, so a reader could keep
@@ -399,10 +459,15 @@ class MeshCoreTransport:
                     await asyncio.wait_for(self._up.wait(), self.SEND_WAIT)
                 except asyncio.TimeoutError:
                     return                    # lost in the air; the protocol repeats it
+            routed = path is not None and self.route
             try:
                 async with self._cmd:
-                    ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
-                                                                  datagram)
+                    if routed:
+                        ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
+                                                                      datagram, path=path)
+                    else:
+                        ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
+                                                                      datagram)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -410,7 +475,10 @@ class MeshCoreTransport:
                 return
             if getattr(ev, "type", None) != self._EventType.ERROR:
                 self._refused_streak = 0
+                self.routed_sends += routed
                 return
+            if routed:
+                path = None                   # the radio didn't like the route: flood instead
             reason = getattr(ev, "payload", None)
             await asyncio.sleep(0.4 * attempt)
         self.refused += 1
@@ -470,6 +538,8 @@ class MeshCoreTransport:
                 return
         if not isinstance(raw, (bytes, bytearray)):
             return
+        if self.route:
+            self._remember_route(bytes(raw))
         for h in list(self.handlers):
             await _call(h, bytes(raw))
 
@@ -525,3 +595,25 @@ async def scan_ble(seconds: float = 6.0) -> list[tuple[str, str, int | None]]:
         if name.startswith("MeshCore") or BLE_UART_SERVICE in uuids:
             out.append((dev.address, name or "MeshCore radio", adv.rssi))
     return sorted(out, key=lambda r: -(r[2] if r[2] is not None else -999))
+
+
+def _digest(raw: bytes) -> bytes:
+    import hashlib
+    return hashlib.sha256(raw).digest()[:12]
+
+
+def _open_group(secret: bytes, body: bytes) -> bytes | None:
+    """Decrypt a MeshCore group (channel) packet: channel hash 1, MAC 2,
+    AES-128-ECB ciphertext; the MAC is HMAC-SHA256 over the ciphertext.
+    None if it isn't for this channel."""
+    import hashlib
+    import hmac
+    from Crypto.Cipher import AES
+    if len(body) < 3 + 16 or (len(body) - 3) % 16:
+        return None
+    if body[0] != hashlib.sha256(secret).digest()[0]:
+        return None
+    mac, ct = body[1:3], body[3:]
+    if hmac.new(secret.ljust(32, b"\0"), ct, hashlib.sha256).digest()[:2] != mac:
+        return None
+    return AES.new(secret, AES.MODE_ECB).decrypt(ct)

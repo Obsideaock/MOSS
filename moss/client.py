@@ -40,6 +40,22 @@ class MossError(Exception):
     """Anything that stops a request: no gateway, refusal, corruption."""
 
 
+class OlderVault(MossError):
+    """The Seed Vault runs an older MOSS that doesn't know this request."""
+
+
+def _explain(error: str, kind: int) -> str:
+    """A vault from before a kind of request existed answers it with a bare
+    'bad request'. Say what that actually means."""
+    if error.strip() == "bad request" and kind >= P.KIND_PAGE:
+        what = {P.KIND_PAGE: "community pages", P.KIND_UPLOAD: "uploads",
+                P.KIND_SPECS: "vault specs", P.KIND_SEARCH_ALL: "community search",
+                P.KIND_PRINT: "spore prints"}.get(kind, "this request")
+        raise OlderVault(f"the Seed Vault is running an older MOSS that doesn't know about "
+                         f"{what} yet. On the Pi: moss update (it restarts the vault), then try again.")
+    return error
+
+
 # ---------------------------------------------------------------- progress
 
 STAGES = ("requesting", "queued", "fetching", "receiving", "repairing",
@@ -87,6 +103,8 @@ class SearchOutcome:
     results: list[SearchResult]
     from_cache: bool = False
     fetched_at: float = 0.0
+    community: list[dict] = field(default_factory=list)   # {a, t, n, f, d, v}
+    more: bool = False                                      # more community results on the vault
 
 
 @dataclass
@@ -244,6 +262,7 @@ class Requester:
         self.notice = notice or (lambda m: None)
         self._hello = asyncio.Event()
         self._hello_result = ""
+        self.vault_version: tuple[str, int] | None = None   # from the vault's HELLO
         self._other_vault = ""
         tx.subscribe(self._on_datagram)
 
@@ -256,6 +275,8 @@ class Requester:
                     # Another vault, or ours with new keys. Not a reason to stop:
                     # ours may answer too. It explains things only if nobody does.
                     self._other_vault = S.fingerprint(heard[0], heard[1])
+                if self._hello_result in ("trusted", "known"):
+                    self.vault_version = S.hello_version(raw)
                 if self._hello_result == "trusted":
                     self.notice(f"Trusting Seed Vault {self.keyring.fingerprint} (first contact). "
                                 f"Check it matches the fingerprint shown on the Pi.")
@@ -355,7 +376,7 @@ class Requester:
             m = ex.manifest
 
             if ex.error:
-                raise MossError(ex.error)
+                raise MossError(_explain(ex.error, kind))
 
             # Say it (again) until the gateway acknowledges.
             if m is None and ex.status is None:
@@ -498,6 +519,7 @@ class _UploadExchange:
         self.missing: set[int] = set()
         self.last_unack = 0.0
         self.result: tuple[bool, str] | None = None
+        self.accept_raw: bytes | None = None   # to learn the route back to the vault
         self.last_heard = time.monotonic()
         self.changed = asyncio.Event()
 
@@ -509,6 +531,7 @@ class _UploadExchange:
             if kind == S.SACCEPT:
                 if self.accepted is None:
                     self.accepted = self.seal.open_accept(raw)
+                    self.accept_raw = raw
                 else:
                     self.reaccepted = True
             elif kind == P.UNACK and self.accepted is not None:
@@ -548,11 +571,19 @@ async def _upload(req: "Requester", page: bytes, offer: str, report: ProgressCal
             report(Progress(stage=stage, message=message, elapsed=time.monotonic() - started,
                             total=len(chunks), have=have, attempt=attempts))
 
+        rounds = {"n": 0}
+
         async def send(indexes: list[int], stage: str) -> None:
+            rounds["n"] += 1
+            route_of = getattr(req.tx, "return_path", None)
+            route = route_of(ex.accept_raw) if route_of and ex.accept_raw and rounds["n"] <= 2 else None
             for n, i in enumerate(indexes):
                 if ex.result or ex.error:
                     return
-                await req.tx.send(P.build_uchunk(rid, i, chunks[i]))
+                if route is None:
+                    await req.tx.send(P.build_uchunk(rid, i, chunks[i]))
+                else:
+                    await req.tx.send(P.build_uchunk(rid, i, chunks[i]), path=route)
                 ex.missing.discard(i)
                 if stage == "uploading":
                     report(Progress(stage=stage, elapsed=time.monotonic() - started,
@@ -563,7 +594,7 @@ async def _upload(req: "Requester", page: bytes, offer: str, report: ProgressCal
         while True:
             now = time.monotonic()
             if ex.error:
-                raise MossError(ex.error)
+                raise MossError(_explain(ex.error, P.KIND_UPLOAD))
             if ex.result:
                 return ex.result
             if ex.accepted is None:
@@ -619,6 +650,13 @@ class MossClient:
         self.requester = Requester(tx, keyring=keyring, notice=notice, **timing)
         self.seen = PG.SeenVersions(home)
         self.upload_gap = upload_gap
+        from .config import moss_home
+        from .social import Social
+        from .sporeprint import CarriedPrints
+        self.home = Path(home) if home else moss_home()
+        self.social = Social(self.home)
+        self.prints = CarriedPrints(self.home)
+        self.share_prints = True             # pass spore prints on to vaults that have none
 
     async def search(self, query: str, refresh: bool = False,
                      on_progress: ProgressCallback | None = None) -> SearchOutcome:
@@ -629,14 +667,23 @@ class MossClient:
             results, at = hit
             if on_progress:
                 on_progress(Progress(stage="done", message="from cache"))
-            return SearchOutcome(query, results, True, at)
-        got = await self.requester.fetch(P.KIND_SEARCH, query, on_progress)
-        results = P.decode_results(got.content)
-        self.cache.put_search(query, results)
+            return SearchOutcome(query, results, True, at,
+                                 self.rank(self.cache.get_community(query)))
+        community, more = [], False
+        try:
+            got = await self.requester.fetch(P.KIND_SEARCH_ALL, f"0\x1f{query}", on_progress)
+            data = _json(got.content)
+            results = [SearchResult(t, b) for t, b in data.get("wiki", [])]
+            community, more = data.get("community", []), bool(data.get("more"))
+        except OlderVault:
+            got = await self.requester.fetch(P.KIND_SEARCH, query, on_progress)   # Wikipedia only
+            results = P.decode_results(got.content)
+        community = self.rank(community)
+        self.cache.put_search(query, results, community)
         if on_progress:
             on_progress(Progress(stage="done", elapsed=got.elapsed,
                                  total=got.chunks, have=list(range(got.chunks))))
-        return SearchOutcome(query, results, False, time.time())
+        return SearchOutcome(query, results, False, time.time(), community, more)
 
     async def article(self, title: str, refresh: bool = False,
                       on_progress: ProgressCallback | None = None) -> ArticleOutcome:
@@ -718,3 +765,88 @@ class MossClient:
         if not stored:
             raise MossError(message)
         return message
+
+    # ------------------------------------------------------------ finding community pages
+    def _saved_texts(self) -> list[str]:
+        """Text of community pages saved here (to find what they link to)."""
+        out = []
+        folder = Path(self.cache.folder) / "pages"
+        for f in folder.glob("*/*.mosspage") if folder.is_dir() else []:
+            try:
+                page = PG.load(f.read_bytes())
+                if not page.deleted:
+                    out.append(page.text())
+            except (OSError, PG.PageError):
+                continue
+        return out
+
+    def rank(self, community: list[dict]) -> list[dict]:
+        """Re-sort the vault's results by what you follow and save (on this device only)."""
+        return self.social.rerank(community, self._saved_texts()) if community else []
+
+    async def more_community(self, query: str, offset: int,
+                             on_progress: ProgressCallback | None = None) -> tuple[list[dict], bool]:
+        got = await self.requester.fetch(P.KIND_SEARCH_ALL, f"{offset}\x1f{query}", on_progress)
+        data = _json(got.content)
+        return self.rank(data.get("community", [])), bool(data.get("more"))
+
+    async def author_pages(self, author_id: str, offset: int = 0,
+                           on_progress: ProgressCallback | None = None) -> tuple[list[dict], bool]:
+        """An author's public pages on this vault, newest first."""
+        try:
+            got = await self.requester.fetch(P.KIND_SEARCH_ALL, f"{offset}\x1fauthor:{author_id}",
+                                             on_progress)
+        except MossError as exc:
+            if "nothing found" in str(exc):
+                return [], False
+            raise
+        data = _json(got.content)
+        return data.get("community", []), bool(data.get("more"))
+
+    # ------------------------------------------------------------ the vault itself
+    async def specs(self, on_progress: ProgressCallback | None = None) -> dict:
+        """What the Seed Vault says about itself (all public), and trade spore
+        prints: pick up its print, or offer one if it has none."""
+        got = await self.requester.fetch(P.KIND_SPECS, "specs", on_progress)
+        specs = _json(got.content)
+        if self.share_prints:
+            try:
+                specs["print_exchange"] = await self._trade_prints(specs)
+            except MossError as exc:
+                specs["print_exchange"] = f"couldn't trade spore prints: {exc}"
+        return specs
+
+    async def _trade_prints(self, specs: dict) -> str:
+        from . import sporeprint as SP
+        theirs = specs.get("spore_print")
+        if theirs:
+            best = self.prints.best(theirs["origin"])
+            if best is None or len(best["links"]) > theirs["hops"]:
+                got = await self.requester.fetch(P.KIND_PRINT, "print")
+                try:
+                    sp = SP.from_bytes(got.content)
+                except SP.PrintError as exc:
+                    return f"its spore print didn't check out ({exc}); ignored"
+                if SP.summary(sp)["origin"] != theirs["origin"]:
+                    return "its spore print didn't match what it described; ignored"
+                self.prints.carry(sp)
+                return "picked up its spore print"
+            return "already carrying that spore print"
+        carried = self.prints.best()
+        if carried is None:
+            return "neither of us has a spore print yet"
+        data = SP.to_bytes(carried)
+        stored, message = await self.requester.upload(
+            data, f"{P.PRINT_OFFER} 1 {len(data)}", None, self.upload_gap)
+        return f"gave it a spore print: {message}" if stored else f"offered a spore print: {message}"
+
+
+def _json(content: bytes) -> dict:
+    import json
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise MossError("the Seed Vault's answer didn't make sense") from exc
+    if not isinstance(data, dict):
+        raise MossError("the Seed Vault's answer didn't make sense")
+    return data

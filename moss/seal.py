@@ -193,7 +193,10 @@ class VaultKeys:
         return eddsa.new(self.ed, "rfc8032").sign(message)
 
     def hello(self) -> bytes:
-        name = self.name.encode()[:P.MAX_DATAGRAM - 129]
+        from . import PROTOCOL, __version__
+        # The name, then (after a zero byte) which MOSS this vault runs.
+        tag = f"\x00moss/{__version__}/{PROTOCOL}".encode()
+        name = self.name.encode()[:P.MAX_DATAGRAM - 129 - len(tag)] + tag
         body = self.x_pub + self.ed_pub
         return bytes([HELLO]) + body + self.sign(b"MOSS hello" + body) + name
 
@@ -223,7 +226,20 @@ def verify_hello(raw: bytes) -> tuple[bytes, bytes, str] | None:
         eddsa.new(eddsa.import_public_key(ed_pub), "rfc8032").verify(b"MOSS hello" + x_pub + ed_pub, sig)
     except (ValueError, TypeError):
         return None
-    return x_pub, ed_pub, raw[129:].decode("utf-8", errors="replace")
+    return x_pub, ed_pub, raw[129:].split(b"\x00")[0].decode("utf-8", errors="replace")
+
+
+def hello_version(raw: bytes) -> tuple[str, int] | None:
+    """(MOSS version, protocol level) a vault announced, or None for one
+    from before vaults said so."""
+    parts = raw[129:].split(b"\x00", 1)
+    if len(parts) < 2 or not parts[1].startswith(b"moss/"):
+        return None
+    try:
+        _, version, level = parts[1].decode().split("/")
+        return version, int(level)
+    except ValueError:
+        return None
 
 
 @dataclass

@@ -34,17 +34,18 @@ read is encrypted: other people on the mesh can't tell what you're reading.
 7. [The #moss channel](#the-moss-channel)
 8. [Private reading (encryption)](#private-reading-encryption)
 9. [Community pages (in progress)](#community-pages-in-progress)
-10. [How it works](#how-it-works)
-11. [Speed and airtime](#speed-and-airtime)
-12. [Being a good mesh neighbour](#being-a-good-mesh-neighbour)
-13. [If the radio drops out](#if-the-radio-drops-out)
-14. [Troubleshooting](#troubleshooting)
-15. [Command reference](#command-reference)
-16. [Where things are stored](#where-things-are-stored)
-17. [Testing](#testing)
-18. [FAQ](#faq)
-19. [Not built yet](#not-built-yet)
-20. [Credits, licences and further reading](#credits-licences-and-further-reading)
+10. [Vault specs and spore prints](#vault-specs-and-spore-prints)
+11. [How it works](#how-it-works)
+12. [Speed and airtime](#speed-and-airtime)
+13. [Being a good mesh neighbour](#being-a-good-mesh-neighbour)
+14. [If the radio drops out](#if-the-radio-drops-out)
+15. [Troubleshooting](#troubleshooting)
+16. [Command reference](#command-reference)
+17. [Where things are stored](#where-things-are-stored)
+18. [Testing](#testing)
+19. [FAQ](#faq)
+20. [Not built yet](#not-built-yet)
+21. [Credits, licences and further reading](#credits-licences-and-further-reading)
 
 ---
 
@@ -131,6 +132,10 @@ MOSS/
 │   ├── vault.py               saved articles -> Obsidian notes
 │   ├── pages.py               community pages: author identities, addresses, signed page files
 │   ├── pages_cli.py           python -m moss author ... / page ...
+│   ├── pagestore.py           the Seed Vault's community pages: limits, search and ranking
+│   ├── sporeprint.py          spore prints: a vault's signed family tree
+│   ├── social.py              follows and favourites (local only)
+│   ├── selftest.py            end-to-end test against a Seed Vault (real or simulated)
 │   ├── menu.py + ui.py        `moss` with no arguments: the menu
 │   ├── setup.py               `moss setup`: reader or Seed Vault, radio, library, service
 │   ├── config.py              what setup remembers (~/.moss/config.json)
@@ -494,7 +499,72 @@ read is readable only by you and the Seed Vault.**
   read ("article (encrypted; not logged)"). `--log-queries` turns that on for
   debugging.
 
-### Community pages (in progress)
+### How it works
+
+It's the standard HPKE pattern (RFC 9180) built from standard pieces:
+X25519 key exchange, HKDF-SHA256 and ChaCha20-Poly1305, from the
+`pycryptodome` library MeshCore already uses. Nothing home-made.
+
+1. The Seed Vault has a long-term key pair. Readers learn its public key
+   once and remember it.
+2. For each request the reader makes a one-time key, combines it with the
+   vault's public key, and encrypts the request with the result.
+3. The vault makes its own one-time key for the reply. The reply key mixes
+   both one-time keys with the vault's long-term key, then the one-time keys
+   are thrown away.
+
+On the radio this costs almost nothing: 48 bytes of a request go to the key
+and the tamper check (leaving 110 bytes for the search text or title, which
+is plenty), and a whole page gets one 16-byte tamper check at the end. Text
+still appears as it arrives; it's shown as received and only saved once the
+whole page passes its check.
+
+### Trust (fingerprints)
+
+The first Seed Vault a reader hears is trusted and remembered in
+`~/.moss/vault.json`, like SSH does. Check its fingerprint (status bar, hover
+the lock) against the one the Pi prints. To be strict from the start, pin it
+before first contact:
+
+```
+python -m moss trust 3F9A-12C4-77E0-5B21     # only trust this vault
+python -m moss trust                         # show who is trusted
+python -m moss trust --forget                # after the Pi's keys were reset on purpose
+```
+
+If a reader's vault stops answering and a vault with a different key answers
+instead (say the Pi was reflashed), the reader says so and suggests
+`moss trust --forget` rather than just "no answer". A second Seed Vault on the
+same channel can't read requests meant for yours, so it can't answer them
+either.
+
+### What a listener can still see
+
+| Hidden | Still visible |
+|---|---|
+| What you searched for | That someone is using MOSS |
+| Which article came back | Roughly when |
+| What the page says | Roughly how big the page was (its spore count) |
+| Error messages | Roughly where the radio is, from its signal |
+
+**Page size** is the one real leak: articles differ in length, so a spore
+count narrows down what was read. On its own it's a weak clue (thousands of
+articles share any given count), but it adds up across many reads. Turn on
+`--pad-sizes` on the Seed Vault to round pages up to standard spore counts
+(1 2 3 4 5 6 8 10 13 16 20 25 32 40 50 63 79 100 …) for about 10% more
+airtime. **Off by default.** (Resent spores don't hide the count: each
+carries its number, and a resent spore is identical to the original.)
+
+**Public things stay public.** Announcements or status pages meant for
+everyone don't need encrypting, since receiving a broadcast says nothing
+about you; they'd be signed by the Seed Vault so nobody can fake one (not
+built yet).
+
+`--plain` on the reader turns encryption off, for debugging only.
+
+---
+
+## Community pages (in progress)
 
 Anyone can publish their own pages to a Seed Vault. The full
 design (visibility, ranking, the review queue, what vault owners can and
@@ -502,14 +572,11 @@ can't do, safety requirements) is in the *MOSS Community Pages Design* doc.
 It's being built in five stages:
 
 1. **Identities and signed pages** ← done
-2. **Uploading to a Seed Vault, and opening a page by its address** ← done (this version)
-3. Finding pages (search, following, author pages)
+2. **Uploading to a Seed Vault, and opening a page by its address** ← done
+3. **Finding pages** (search, ranking, following, author pages, the editor),
+   plus vault specs, spore prints, routing and the dedicated link ← done (this version)
 4. Locked (password-protected) pages
 5. Owner tools: removal log, review queue, quiet-hours scheduling
-
-Right now you can make pages, upload them, and read any page whose address
-you have. Search for community pages comes with stage 3, so for now share
-addresses directly (MeshCore chat, paper, out loud).
 
 ### Identities
 
@@ -632,6 +699,47 @@ copy can't be uploaded again to bring the page back. Its log says "stored a
 community page (12 spores)" without saying which, unless it runs with
 `--log-queries`.
 
+### Finding pages
+
+Every search now shows two groups: **Wikipedia** and **Community** (the
+vault's 10 best public pages; *More from the community* fetches the next 10).
+Unlisted pages never appear.
+
+How the Seed Vault ranks, the same for everyone:
+
+1. **Text match**: words in the title count most, then the one-line
+   description and author name, then the text.
+2. **Link score**, like Google's original PageRank: a page scores higher
+   when other authors link to it, more so when those authors are linked to
+   themselves. Links count once per distinct *other* author (one author with
+   fifty pages linking to themselves counts for nothing), and links inside
+   locked pages are invisible to the vault.
+3. **Downloads** (a plain count per public page: no who, no when) and
+   **freshness** (a small boost in the first 30 days).
+
+Then your reader re-sorts the results **on your device**: authors you follow
+first, then your favourites, then pages your saved pages link to, then pages
+you open most. None of that is ever sent, so no vault owner can see who
+follows whom.
+
+Each author's public pages are one tap away (*Their pages* on any page, or
+`author:<id>` in a search). Links between pages work in both directions:
+`[[moss:<address>|text]]` or a bare `moss:` address in a page opens it.
+
+### Following and favourites
+
+On any community page: **Follow** the author, ★ to favourite the page.
+Favourites and saved pages sit in the **Community** folder on the left of
+the browser reader. All of it lives in `~/.moss/social.json` on your device.
+
+### Writing in the browser
+
+*Community → My pages → New page* opens an editor: write Markdown, preview
+it, choose public or unlisted and who it's from (yourself, a new anonymous
+identity, or a new named identity), then **Sign and upload**. Your own
+pages have an ✎ to publish a new version. `.md` files and the menu still
+work as before.
+
 ### What makes a page trustworthy
 
 A `.mosspage` file is a signed record plus the compressed text. The
@@ -655,68 +763,44 @@ compression bomb.
 
 ---
 
-## How it works
+## Vault specs and spore prints
 
-It's the standard HPKE pattern (RFC 9180) built from standard pieces:
-X25519 key exchange, HKDF-SHA256 and ChaCha20-Poly1305, from the
-`pycryptodome` library MeshCore already uses. Nothing home-made.
+**Vault specs**: anyone can ask a Seed Vault about itself: *This Seed
+Vault* in the browser reader, *This Seed Vault* in the menu, or
+`moss vault-info`. It shows:
 
-1. The Seed Vault has a long-term key pair. Readers learn its public key
-   once and remember it.
-2. For each request the reader makes a one-time key, combines it with the
-   vault's public key, and encrypts the request with the result.
-3. The vault makes its own one-time key for the reply. The reply key mixes
-   both one-time keys with the vault's long-term key, then the one-time keys
-   are thrown away.
+- name and fingerprint, and which MOSS it runs (and says so if it's older
+  than yours: `moss update` on the Pi);
+- its library;
+- how many public community pages it has, and its upload limits;
+- **free storage**: room left for community pages and free disk space;
+- its spore print.
 
-On the radio this costs almost nothing: 48 bytes of a request go to the key
-and the tamper check (leaving 110 bytes for the search text or title, which
-is plenty), and a whole page gets one 16-byte tamper check at the end. Text
-still appears as it arrives; it's shown as received and only saved once the
-whole page passes its check.
+Specs never include anything private: nothing about readers or requests,
+no read counts or logs, nothing about unlisted pages (not even how many),
+no author behind any upload.
 
-### Trust (fingerprints)
+**Spore prints** are a vault's family tree, back to the original Seed Vault
+at ATLAS, CU Boulder: *"2 hops from the original: ATLAS Seed Vault →
+Lafayette → Longmont, since 2026-12-04"*.
 
-The first Seed Vault a reader hears is trusted and remembered in
-`~/.moss/vault.json`, like SSH does. Check its fingerprint (status bar, hover
-the lock) against the one the Pi prints. To be strict from the start, pin it
-before first contact:
+- The original vault's owner starts it once: `moss spore-print "The original
+  Seed Vault, ATLAS, CU Boulder, Colorado"` on the Pi (or *Spore print* in
+  the Pi's menu), then restarts the vault. Installs never make one.
+- Readers pick up a vault's print when they look at its specs, and give it
+  to the next vault they meet that has none. That vault adds its own signed
+  link and keeps that print forever.
+- Every link is signed by its vault, all the way back to the original's
+  key, so a print can't be faked, edited or cut short, and nobody can make a
+  second "original" with the same fingerprint.
+- **Prints never name readers**: a link says it was carried "via a reader",
+  never which one, so prints can't show where anyone has been.
+- Your reader's own print (the first vault it met) is shown only to you.
 
-```
-python -m moss trust 3F9A-12C4-77E0-5B21     # only trust this vault
-python -m moss trust                         # show who is trusted
-python -m moss trust --forget                # after the Pi's keys were reset on purpose
-```
-
-If a reader's vault stops answering and a vault with a different key answers
-instead (say the Pi was reflashed), the reader says so and suggests
-`moss trust --forget` rather than just "no answer". A second Seed Vault on the
-same channel can't read requests meant for yours, so it can't answer them
-either.
-
-### What a listener can still see
-
-| Hidden | Still visible |
-|---|---|
-| What you searched for | That someone is using MOSS |
-| Which article came back | Roughly when |
-| What the page says | Roughly how big the page was (its spore count) |
-| Error messages | Roughly where the radio is, from its signal |
-
-**Page size** is the one real leak: articles differ in length, so a spore
-count narrows down what was read. On its own it's a weak clue (thousands of
-articles share any given count), but it adds up across many reads. Turn on
-`--pad-sizes` on the Seed Vault to round pages up to standard spore counts
-(1 2 3 4 5 6 8 10 13 16 20 25 32 40 50 63 79 100 …) for about 10% more
-airtime. **Off by default.** (Resent spores don't hide the count: each
-carries its number, and a resent spore is identical to the original.)
-
-**Public things stay public.** Announcements or status pages meant for
-everyone don't need encrypting, since receiving a broadcast says nothing
-about you; they'd be signed by the Seed Vault so nobody can fake one (not
-built yet).
-
-`--plain` on the reader turns encryption off, for debugging only.
+Anyone can start a separate family tree with their own vault. The original
+is the one whose root fingerprint matches ATLAS's. Once the ATLAS vault has
+its print, its fingerprint goes into MOSS (`KNOWN_ORIGINALS` in
+`moss/sporeprint.py`) so readers can label it.
 
 ---
 
@@ -802,9 +886,21 @@ people's transfers.
 | 15 | UNACK (upload bare patch) | type 1, id 2, count 1, numbers 2 each | vault → reader |
 | 16 | SRESULT (upload result) | type 1, id 2, sealed stored-or-not and message, check 16 | vault → reader |
 
-A sealed request carries a *kind*: 1 search, 2 article, 3 community page
-(the query is its address), 4 upload (the query is the offer: address,
-version, size).
+A sealed request carries a *kind*:
+
+| Kind | Request |
+|---|---|
+| 1 | Search (Wikipedia only; older readers) |
+| 2 | Article |
+| 3 | Community page (the query is its address) |
+| 4 | Upload (the query is the offer: address, version, size; address `spore-print` offers a spore print) |
+| 5 | Vault specs |
+| 6 | Search, Wikipedia and community (query: offset, `\x1f`, the text; or `author:<id>`) |
+| 7 | The vault's spore print |
+
+A vault that doesn't know a kind answers "bad request", which the reader
+turns into "the Seed Vault is running an older MOSS; moss update on the
+Pi". HELLO also carries the vault's MOSS version, after a zero byte.
 
 With encryption on (the normal case) only types 2, 3, 4, 6 and 8–16 go out.
 Types 1, 5 and 7 are kept for `--plain` and for the older tools.
@@ -965,7 +1061,42 @@ What you can do:
   MOSS traffic.
 - Cap article size (`--max-bytes`) or drop links (`--no-links`) if airtime
   is tight.
-- For heavy use, consider a dedicated link on its own preset or frequency.
+- For heavy use, consider a dedicated link on its own preset or frequency
+  (below).
+
+### Routing instead of flooding (opt-in)
+
+With `--route` on the Seed Vault (in `MOSS_EXTRA`, or *Extra options* in the
+Pi's menu), a reply's spores go back **along the route the request came
+by**, so only the repeaters in between carry them, not every repeater in
+range. Readers can do the same for uploads (*Settings → Routing* in the
+menu, or `--route`).
+
+How it works, on stock firmware: the radio logs the route of every packet it
+hears. MOSS decrypts `#moss` packets in that log with the channel's
+(public) key to match each one to the MOSS message inside, and sends replies
+back along that route reversed. It's still `#moss` channel data: no
+contacts, no new tags naming who's talking.
+
+It falls back to flooding:
+- when no route is known (the radio didn't log one, or the request came
+  directly);
+- for routes using multi-byte repeater ids;
+- if the radio refuses a route;
+- from the third repair round on, in case the route went bad.
+
+Control messages (pulses, capsules, results) always flood. This is new and
+**needs testing on your mesh**. The vault's log says "route back known (2
+hops)" when it's being used.
+
+### A dedicated link
+
+To take MOSS off the public mesh entirely, put the vault and all its
+readers on their own settings: `moss radio-link 915.0 62.5 7 5` (frequency
+MHz, bandwidth kHz, spreading factor, coding rate) on each, or *Radio check
+→ Dedicated link* in the menu. `moss radio-link --public` goes back to
+MeshCore's usual US settings. On a dedicated link those radios can't hear
+the public mesh. Some radios need a restart to switch.
 
 ---
 
@@ -1056,11 +1187,14 @@ Run `python -m moss <command> --help` for every option.
 | `page mine` | Laptop | Everything you've published. |
 | `page upload [ADDRESS or FILE]` | Laptop | Upload what's waiting in the outbox (or one page). |
 | `page open ADDRESS [--refresh]` | Laptop | Read a community page by its address. |
-| `selftest` | Laptop | End-to-end test with the Seed Vault: search, upload, read back, replay, delete. |
+| `selftest` | Laptop | End-to-end test with the Seed Vault: search, specs, upload, read back, replay, delete. |
+| `vault-info` | Laptop | The Seed Vault's specs: version, library, free storage, spore print (and trades spore prints). |
+| `spore-print ["NOTE"]` | Pi | Show the vault's spore print, or start the original one. |
+| `radio-link FREQ BW SF CR` / `--public` | Both | Put this radio on a dedicated link, or back on the public mesh. |
 
 Options shared by radio commands: `--port`, `--ble [ADDRESS]` and `--pin`
 (Bluetooth instead of USB), `--channel-name` (default `#moss`), `--scope`,
-`--cache`, `--debug`. Reader options: `--refresh` (ask over radio
+`--route` (opt-in routing), `--cache`, `--debug`. Reader options: `--refresh` (ask over radio
 even if saved), `--quiet` (seconds of silence before asking for bare
 patches, default 6), `--idle`, `--plain`, `--no-pager`, and `--sim FOLDER_OR_ZIM`
 (with `--sim-loss`, `--sim-airtime`, `--pad-sizes`, `--no-links`) for a
@@ -1089,6 +1223,10 @@ is a `Gateway` setting in code (`capsule_every`).
 | `~/.moss/cache/pages/` | Laptop | Community pages you've opened, as signed by their authors |
 | `~/.moss/seed-vault/pages/<author id>/*.mosspage` | Pi | Community pages the vault carries (newest version of each) |
 | `~/.moss/seed-vault/pages/uploads.json` | Pi | Today's upload counts per author id, for the limits (nothing older than yesterday) |
+| `~/.moss/social.json` | Laptop | Who you follow, favourites, how often you open pages (never sent anywhere) |
+| `~/.moss/spore-prints/` | Laptop | Spore prints this reader carries, and its own (`mine.json`) |
+| `~/.moss/seed-vault/spore-print.json` | Pi | The vault's spore print (never changes once set) |
+| `~/.moss/seed-vault/pages/downloads.json` | Pi | Download count per public page (no who, no when) |
 | `~/.moss/seen-pages.json` | Laptop | Newest version seen of each page, so old copies can't be replayed |
 | `~/.moss/seed-vault/x25519.pem`, `ed25519.pem` | Pi | The Seed Vault's private keys (readable only by its user) |
 | `/etc/moss/gateway.env` | Pi | Service settings |
@@ -1131,6 +1269,19 @@ including:
   - a vault serving an older copy, or a tampered one, refused by the reader;
   - the hardware self-test run end to end, including catching a vault that
     wrongly accepts replays;
+- **finding pages and stage 3**:
+  - ranking (linked pages first, link farms counting once, unlisted and
+    deleted pages never shown), paging and author listings;
+  - your follows moving results up without ever appearing in a request;
+  - vault specs (including free storage) that never contain unlisted
+    pages, authors or reads;
+  - an older vault explained, with search falling back to Wikipedia only;
+  - spore prints: chains growing, forgeries (edited, cut, renamed,
+    re-rooted) refused, readers never named, a reader carrying a print from
+    one vault to another;
+  - routing learned from the radio's packet log, off by default, never
+    matching other channels, falling back to flooding;
+  - the dedicated-link settings;
 - **install and update**: settings files rewritten without losing comments,
   `moss update` against real git repositories (moving forward, stashing
   local edits, refusing local commits, switching branches), setup keeping
@@ -1166,6 +1317,8 @@ both machines on the same MOSS version: `moss update` on each):
    4. uploads and reads back a second version;
    5. checks the vault refuses the old version when sent again;
    6. deletes the page.
+
+   It also checks the vault's specs, for 8 steps in all.
 
    Each step prints PASS or FAIL with how long it took. Expect a few minutes.
 
@@ -1236,7 +1389,7 @@ thing.
 
 Ideas discussed for later:
 
-- **Community pages, stages 3–5** (see [above](#community-pages-in-progress)).
+- **Community pages, stages 4–5** (see [above](#community-pages-in-progress)).
 - **Searching across vaults**: pages that only live on another vault, found
   through shared catalogues between vaults (see the design doc).
 - **Reader + Seed Vault devices**: a desktop with a radio that reads and also

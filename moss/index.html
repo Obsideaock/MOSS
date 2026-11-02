@@ -284,7 +284,18 @@ a { color: var(--text-accent); }
 .btn:hover { background: var(--color-accent-2); }
 .btn.quiet { background: var(--field); color: var(--text); border: 1px solid var(--border); }
 .btn.quiet:hover { background: var(--hover); }
-.row-actions { display: flex; gap: 8px; margin-top: 10px; }
+.row-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.group-title { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 18px 0 6px; display: flex; align-items: center; gap: 8px; }
+.search-result .by { font-size: 12.5px; color: var(--muted); margin: 2px 0 0 22px; }
+.badge { font-size: 11px; font-weight: 500; color: var(--text-accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; margin-left: 6px; }
+.form { display: grid; gap: 12px; max-width: 46rem; }
+.form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.form input, .form select, .form textarea { font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px 9px; }
+.form textarea { min-height: 22rem; font-family: var(--font-mono, ui-monospace, monospace); font-size: 13.5px; line-height: 1.5; resize: vertical; }
+.form .hint { font-size: 12.5px; color: var(--faint); }
+.kv { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 6px 14px; font-size: 14px; }
+.kv .k { color: var(--muted); }
+.cbtn.on { color: var(--text-accent); }
 
 /* ---------------- narrow screens ---------------- */
 @media (max-width: 960px) { .app { --right-w: 0px; } .app .right { display: none; } }
@@ -360,6 +371,12 @@ const main = $("#main"), qInput = $("#q"), goBtn = $("#go"), appEl = $("#app");
 
 /* ---------- icons (Lucide, ISC licence) ---------- */
 const ICONS = {
+  star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  pencil: '<path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  server: '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/>',
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
@@ -491,10 +508,17 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLinkMenu(); });
 
+/* A link to a community page: moss:<author>/<name>, bare or as [[moss:...|text]]. */
+function pageLink(address, text) {
+  return h("button", { class: "internal-link", type: "button", title: `Community page ${address}`,
+    onclick: (e) => { e.stopPropagation(); openPage(address); } }, text);
+}
+
 function wikiLink(inner, ctx) {
   const bar = inner.indexOf("|");
   const target = (bar < 0 ? inner : inner.slice(0, bar)).trim();
   const text = bar < 0 ? inner : inner.slice(bar + 1);
+  if (target.startsWith("moss:")) return pageLink(target, text);
   const saved = ctx.saved.has(target.toLowerCase());
   if (saved) ctx.linked.add(app.cached.find((a) => a.title.toLowerCase() === target.toLowerCase()).title);
   const cls = "internal-link" + (saved ? "" : " is-unresolved" + (laterHas(target) ? " is-later" : ""));
@@ -504,17 +528,18 @@ function wikiLink(inner, ctx) {
 }
 
 /* [[link]] | $math$ | **bold** | *italic* -- \$ and \* are literal characters. */
-const INLINE = /(\[\[[^\[\]]+\]\])|((?<!\\)\$(?!\s)(?:\\.|[^\\$])+?(?<!\s)\$)|((?<!\\)\*\*(?![\s*])(?:\\.|[^\\*])+?(?<![\s\\])\*\*)|((?<![\\*])\*(?![\s*])(?:\\.|\[\[[^\]]*\]\]|[^\\*])+?(?<![\s\\])\*)/g;
+const INLINE = /(moss:[a-z2-7]{26}\/~?[a-z0-9-]{1,48})|(\[\[[^\[\]]+\]\])|((?<!\\)\$(?!\s)(?:\\.|[^\\$])+?(?<!\s)\$)|((?<!\\)\*\*(?![\s*])(?:\\.|[^\\*])+?(?<![\s\\])\*\*)|((?<![\\*])\*(?![\s*])(?:\\.|\[\[[^\]]*\]\]|[^\\*])+?(?<![\s\\])\*)/g;
 const unescape = (s) => s.replace(/\\([$*])/g, "$1");
 function inline(text, ctx = { saved: new Set(), linked: new Set() }) {
   const out = [];
   let last = 0;
   for (const m of text.matchAll(INLINE)) {
     if (m.index > last) out.push(unescape(text.slice(last, m.index)));
-    if (m[1]) out.push(wikiLink(m[1].slice(2, -2), ctx));
-    else if (m[2]) out.push(mathEl(m[2].slice(1, -1), false));
-    else if (m[3]) out.push(h("strong", {}, inline(m[3].slice(2, -2), ctx)));
-    else out.push(h("em", {}, inline(m[4].slice(1, -1), ctx)));
+    if (m[1]) out.push(pageLink(m[1], m[1]));
+    else if (m[2]) out.push(wikiLink(m[2].slice(2, -2), ctx));
+    else if (m[3]) out.push(mathEl(m[3].slice(1, -1), false));
+    else if (m[4]) out.push(h("strong", {}, inline(m[4].slice(2, -2), ctx)));
+    else out.push(h("em", {}, inline(m[5].slice(1, -1), ctx)));
     last = m.index + m[0].length;
   }
   if (last < text.length) out.push(unescape(text.slice(last)));
@@ -682,7 +707,7 @@ function chrome({ tab, crumb = [], back = false, actions = [] }) {
   });
   $("#back").disabled = !back;
   $("#actions").replaceChildren(...actions.map((a) =>
-    h("button", { class: "cbtn", "aria-label": a.label, title: a.label, onclick: a.run }, svg(a.icon))));
+    h("button", { class: "cbtn" + (a.on ? " on" : ""), "aria-label": a.label, title: a.label, onclick: a.run }, svg(a.icon))));
 }
 
 function setStat(text) {
@@ -722,7 +747,24 @@ function renderTree() {
           h("button", { class: "drop", "aria-label": `Remove ${t} from Read later`, title: "Remove from Read later",
             onclick: () => laterToggle(t) }, svg("x", "s"))))
       : h("div", { class: "empty" }, "Links you mark “Read later” collect here.")));
-  tree.replaceChildren(folder, laterFolder);
+  const com = app.community || { saved: [], favourites: {}, follows: {}, mine: [] };
+  const favs = Object.entries(com.favourites || {});
+  const comFolder = h("div", { class: "folder" + (app.comOpen === false ? " collapsed" : "") },
+    h("button", { class: "tree-item-self", "aria-expanded": String(app.comOpen !== false),
+      onclick: () => { app.comOpen = app.comOpen === false; renderTree(); } },
+      svg("chevron", "s"), svg("user", "s"), h("span", { class: "label" }, "Community"),
+      h("span", { class: "count" }, com.saved.length || "")),
+    h("div", { class: "children" },
+      h("div", { class: "file" }, h("button", { class: "tree-item-self", onclick: () => myPagesView() },
+        svg("pencil", "s"), h("span", { class: "label" }, "My pages"))),
+      h("div", { class: "file" }, h("button", { class: "tree-item-self", onclick: () => openSpecs() },
+        svg("server", "s"), h("span", { class: "label" }, "This Seed Vault"))),
+      favs.map(([a, t]) => h("div", { class: "file" }, h("button", { class: "tree-item-self", title: a, onclick: () => openPage(a) },
+        svg("star", "s"), h("span", { class: "label" }, t || a)))),
+      com.saved.filter((p) => !(p.address in (com.favourites || {}))).map((p) => h("div", { class: "file" },
+        h("button", { class: "tree-item-self", title: `${p.address}, by ${p.author}`, onclick: () => openPage(p.address) },
+          svg("file", "s"), h("span", { class: "label" }, p.title))))));
+  tree.replaceChildren(folder, comFolder, laterFolder);
 }
 
 function renderOutline(view, linkedTitles = []) {
@@ -754,19 +796,43 @@ function home() {
   renderTree(); renderOutline(null); setStat("");
 }
 
+function communityResult(c) {
+  return h("button", { class: "search-result", onclick: () => openPage(c.a) },
+    h("div", { class: "t" }, svg("user", "s"), c.t || "Untitled",
+      c.following ? h("span", { class: "badge" }, "following") : null,
+      c.favourite ? h("span", { class: "badge" }, "★") : null),
+    h("div", { class: "by" }, `by ${c.n || "anonymous"} · ${c.f}`),
+    c.d ? h("div", { class: "m" }, c.d) : null);
+}
+
 function pickerView(data) {
   app.view = "results"; app.current = null;
   const saved = savedSet();
+  const community = data.community || [];
   chrome({ tab: `Search: ${data.query}`, crumb: ["Search", data.query],
     actions: data.from_cache ? [{ icon: "refresh", label: "Search again over radio", run: () => runSearch(data.query, true) }] : [] });
+  const n = data.results.length + community.length;
+  const list = h("div", {}, community.map(communityResult));
+  let offset = community.length;
+  const more = data.more ? h("button", { class: "btn quiet", onclick: async (e) => {
+    e.currentTarget.disabled = true;
+    const job = await api("/api/more", "POST", { q: data.query, offset });
+    track(job, "search", `${data.query} (more)`, (res) => {
+      data.community = community.concat(res.community); data.more = res.more; pickerView(data);
+    }, null);
+  } }, "More from the community") : null;
   show(h("div", {},
     h("div", { class: "search-info" },
-      `${data.results.length} result${data.results.length === 1 ? "" : "s"} for “${data.query}”`,
+      `${n} result${n === 1 ? "" : "s"} for “${data.query}”`,
       data.from_cache ? `(saved ${ago(data.fetched_at)})` : null),
+    data.results.length && community.length ? h("div", { class: "group-title" }, svg("file", "s"), "Wikipedia") : null,
     data.results.map((r) => h("button", { class: "search-result", onclick: () => openArticle(r.title) },
       h("div", { class: "t" }, svg("file", "s"), r.title,
         saved.has(r.title.toLowerCase()) ? h("span", { class: "saved" }, "saved") : null),
-      r.blurb ? h("div", { class: "m" }, r.blurb) : null))));
+      r.blurb ? h("div", { class: "m" }, r.blurb) : null)),
+    community.length ? h("div", { class: "group-title" }, svg("user", "s"), "Community") : null,
+    list, more ? h("div", { class: "row-actions" }, more) : null));
+  app.lastResults = data;
   renderTree(); renderOutline(null); setStat("");
 }
 
@@ -896,7 +962,7 @@ function track(job, kind, label, onDone, retry) {
     }
     if (j.error && !j.state) { stop(); return failView(j.error, retry); }
     updateAir(ui, j.progress);
-    if (j.state === "done") { stop(); await loadCached(); onDone(j.result); }
+    if (j.state === "done") { stop(); await loadCached(); await loadCommunity(); onDone(j.result); }
     else if (j.state === "error") { stop(); failView(j.error, retry); }
   };
   app.timer = setInterval(tick, 400);
@@ -933,15 +999,26 @@ function pageView(r) {
   const p = r.page;
   app.view = "article"; app.current = { title: r.title, text: r.text };
   closeLinkMenu();
-  chrome({ tab: r.title, crumb: ["Community", r.title], back: !!app.lastResults,
-    actions: [{ icon: "refresh", label: "Fetch again over radio", run: () => openPage(p.address, true) }] });
+  const acts = [{ icon: "refresh", label: "Fetch again over radio", run: () => openPage(p.address, true) }];
+  if (!p.deleted) acts.unshift({ icon: "star", label: p.favourite ? "Remove from favourites" : "Add to favourites",
+    on: p.favourite, run: async () => {
+      const res = await api("/api/favourite", "POST", { address: p.address, title: r.title, on: !p.favourite });
+      p.favourite = res.favourite; await loadCommunity(); pageView(r);
+    } });
+  if (p.mine && !p.deleted) acts.unshift({ icon: "pencil", label: "Edit (publishes a new version)", run: () => editorView({ address: p.address }) });
+  chrome({ tab: r.title, crumb: ["Community", r.title], back: !!app.lastResults, actions: acts });
   const how = r.from_cache ? "saved copy"
     : `over radio in ${secs(r.elapsed)}, ${r.packets} spore${r.packets === 1 ? "" : "s"}`;
   const row = (icon, key, val) => h("div", { class: "prop" },
     h("div", { class: "key" }, svg(icon, "s"), key), h("div", { class: "val" }, val));
   const props = h("details", { class: "properties", open: "" },
     h("summary", {}, svg("chevron", "s"), "Properties"),
-    row("tag", "author", `${p.author} · ${p.fingerprint}`),
+    row("tag", "author", h("span", {}, `${p.author} · ${p.fingerprint} `,
+      h("button", { class: "btn quiet", onclick: async () => {
+        const res = await api("/api/follow", "POST", { author_id: p.author_id, name: p.author, on: !p.following });
+        p.following = res.following; await loadCommunity(); pageView(r);
+      } }, p.following ? "Following ✓" : "Follow"), " ",
+      h("button", { class: "btn quiet", onclick: () => openAuthor(p.author_id, p.author) }, "Their pages"))),
     row("lock", "signature", "checked: written by this author, unchanged"),
     row("calendar", "version", `v${p.version}, signed ${day(p.signed)}`),
     row("link", "address", h("code", {}, p.address)),
@@ -956,6 +1033,150 @@ function pageView(r) {
   const body = renderText(r.text, { withTitle: false });
   show(h("div", {}, h("h1", { class: "inline-title" }, r.title), props, body.node));
   renderOutline(body.node, [...body.linked]); setStat(r.text);
+}
+
+async function openAuthor(id, name) {
+  const job = await api("/api/author", "POST", { id, name });
+  if (job.error) return failView(job.error, null);
+  track(job, "search", `pages by ${name || "anonymous"}`, authorView, () => openAuthor(id, name));
+}
+
+function authorView(res) {
+  app.view = "results"; app.current = null;
+  const name = res.name || "anonymous";
+  chrome({ tab: name, crumb: ["Community", name], back: !!app.lastResults });
+  show(h("div", {},
+    h("h1", { class: "inline-title" }, `Pages by ${name}`),
+    h("div", { class: "row-actions" }, h("button", { class: "btn quiet", onclick: async () => {
+      const r2 = await api("/api/follow", "POST", { author_id: res.author_id, name, on: !res.following });
+      res.following = r2.following; await loadCommunity(); authorView(res);
+    } }, res.following ? "Following ✓" : "Follow")),
+    h("p", { class: "search-info" }, res.community.length
+      ? "Public pages on this Seed Vault, newest first." : "No public pages by this author on this Seed Vault."),
+    res.community.map(communityResult)));
+  renderTree(); renderOutline(null); setStat("");
+}
+
+async function openSpecs() {
+  const job = await api("/api/specs", "POST", {});
+  if (job.error) return failView(job.error, null);
+  track(job, "search", "This Seed Vault", specsView, openSpecs);
+}
+
+function specsView(s) {
+  app.view = "specs"; app.current = null;
+  chrome({ tab: "This Seed Vault", crumb: ["Seed Vault", s.name || "Seed Vault"],
+    actions: [{ icon: "refresh", label: "Ask again", run: openSpecs }] });
+  const kv = (k, v) => [h("div", { class: "k" }, k), h("div", {}, v)];
+  const c = s.community, st = s.storage;
+  show(h("div", {},
+    h("h1", { class: "inline-title" }, s.name || "Seed Vault"),
+    h("div", { class: "kv" },
+      kv("Fingerprint", h("code", {}, s.fingerprint || "?")),
+      kv("MOSS version", `${s.moss}${s.older ? " (older than this reader: moss update on the Pi)" : ""}`),
+      kv("Library", s.library || "not said"),
+      c ? kv("Community pages", `${c.public_pages} public`) : [],
+      c ? kv("Uploads", c.uploads ? `on: up to ${c.cap_spores} spores a page, ${c.per_author_per_day} a day per author, ${c.spores_per_day} spores a day in all` : "off") : [],
+      st ? kv("Free storage", `${st.free_mb} MB for community pages (${st.used_mb} of ${st.cap_mb} MB used; ${st.disk_free_mb} MB free on disk)`) : [],
+      kv("Spore print", s.spore_print_text || "none yet"),
+      s.print_exchange ? kv("", h("span", { class: "hint" }, s.print_exchange)) : [],
+      s.mine ? kv("This reader", `first sprouted from: ${s.mine}`) : []),
+    h("p", { class: "empty-state-note", style: "text-align:left;margin:22px 0 0" },
+      "Everything here is public. A Seed Vault never says anything about who reads what.")));
+  renderOutline(null); setStat("");
+}
+
+async function myPagesView() {
+  await loadCommunity();
+  app.view = "mine"; app.current = null;
+  chrome({ tab: "My pages", crumb: ["Community", "My pages"],
+    actions: [{ icon: "plus", label: "New page", run: () => editorView({}) }] });
+  const mine = app.community.mine;
+  show(h("div", {},
+    h("h1", { class: "inline-title" }, "My pages"),
+    h("div", { class: "row-actions" }, h("button", { class: "btn", onclick: () => editorView({}) }, "New page")),
+    mine.length ? null : h("p", { class: "search-info" }, "You haven't published anything yet."),
+    mine.map((m) => h("div", { class: "search-result" },
+      h("div", { class: "t" }, svg(m.deleted ? "x" : "file", "s"), m.title,
+        h("span", { class: "badge" }, `v${m.version}`), h("span", { class: "badge" }, m.deleted ? "deleted" : m.visibility),
+        m.waiting ? h("span", { class: "badge" }, "waiting to upload") : null),
+      h("div", { class: "by" }, h("code", {}, m.address), ` · ${m.identity}`),
+      h("div", { class: "row-actions" },
+        m.deleted ? null : h("button", { class: "btn quiet", onclick: () => openPage(m.address) }, "Open"),
+        m.deleted ? null : h("button", { class: "btn quiet", onclick: () => editorView({ address: m.address }) }, "Edit"),
+        m.waiting ? h("button", { class: "btn", onclick: () => uploadPage(m.address) }, "Upload now") : null)))));
+  renderTree(); renderOutline(null); setStat("");
+}
+
+function uploadPage(address) {
+  api("/api/upload", "POST", { address }).then((job) => {
+    if (job.error) return failView(job.error, null);
+    track(job, "page", "Uploading", async (res) => {
+      await loadCommunity();
+      show(callout("example", `Uploaded: ${res.message}`, "upload",
+        h("p", {}, "The page is on the Seed Vault now. Its address:"), h("p", {}, h("code", {}, res.address)),
+        h("div", { class: "row-actions" },
+          h("button", { class: "btn", onclick: () => openPage(res.address, true) }, "Open it"),
+          h("button", { class: "btn quiet", onclick: () => navigator.clipboard && navigator.clipboard.writeText(res.address) }, "Copy address"))));
+    }, () => uploadPage(address));
+  });
+}
+
+async function editorView({ address }) {
+  app.view = "editor"; app.current = null;
+  const ids = await api("/api/identities");
+  let text = "# Title\n\nWrite your page here. Links: [[Water purification]] for Wikipedia, or paste a moss: address.\n";
+  if (address) {
+    const got = await api(`/api/mytext?address=${encodeURIComponent(address)}`);
+    if (got.text) text = got.text;
+  }
+  chrome({ tab: address ? "Edit page" : "New page", crumb: ["Community", address ? "Edit page" : "New page"] });
+  const area = h("textarea", { spellcheck: "true" }); area.value = text;
+  const title = h("input", { placeholder: "From the first # heading if left empty" });
+  const vis = h("select", {}, h("option", { value: "public" }, "Public: anyone can find it in search"),
+    h("option", { value: "unlisted" }, "Unlisted: only people with the link"));
+  const named = ids.filter((i) => !i.anonymous);
+  const who = h("select", {}, named.map((i) => h("option", { value: i.id, selected: i.default ? "" : null }, `${i.label} (${i.fingerprint})`)),
+    h("option", { value: "anonymous" }, "A new anonymous identity (nothing links it to you)"),
+    h("option", { value: "__new" }, "A new identity…"));
+  const newName = h("input", { placeholder: "Display name (anyone can see it)" });
+  const newRow = h("label", { style: "display:none" }, "New identity's name", newName);
+  who.addEventListener("change", () => { newRow.style.display = who.value === "__new" ? "" : "none"; });
+  if (!named.length) { who.value = "__new"; newRow.style.display = ""; }
+  const preview = h("div", {});
+  const msg = h("p", { class: "hint" });
+  const sign = async () => {
+    msg.textContent = "Signing…";
+    let identity = who.value;
+    if (!address && identity === "__new") {
+      const made = await api("/api/identities", "POST", { name: newName.value });
+      if (made.error) { msg.textContent = made.error; return; }
+      identity = made.id;
+    }
+    const res = await api("/api/pages/sign", "POST", { text: area.value, title: title.value, address,
+      visibility: vis.value, identity });
+    if (res.error) { msg.textContent = res.error; return; }
+    msg.textContent = `Signed v${res.version}, ${res.spores} spores${res.over_cap ? " (over the usual 250-spore cap; the vault may refuse it)" : ""}. Uploading…`;
+    uploadPage(res.address);
+  };
+  show(h("div", { class: "form" },
+    h("h1", { class: "inline-title" }, address ? "New version" : "New page"),
+    address ? h("p", { class: "hint" }, h("code", {}, address)) : null,
+    h("label", {}, "Text (Markdown: # headings, **bold**, [[links]], $math$, tables)", area),
+    h("label", {}, "Title", title),
+    address ? null : h("label", {}, "Who can find it", vis),
+    address ? null : h("label", {}, "Post as", who),
+    address ? null : newRow,
+    h("div", { class: "row-actions" },
+      h("button", { class: "btn quiet", onclick: () => preview.replaceChildren(renderText(area.value).node) }, "Preview"),
+      h("button", { class: "btn", onclick: sign }, address ? "Sign and upload new version" : "Sign and upload")),
+    msg, preview));
+  renderOutline(null); setStat("");
+}
+
+async function loadCommunity() {
+  try { app.community = await api("/api/community"); } catch { /* keep the old one */ }
+  renderTree();
 }
 
 async function loadCached() { app.cached = await api("/api/cached"); renderTree(); }
@@ -1009,6 +1230,7 @@ async function refreshLink() {
   await refreshLink();
   setInterval(refreshLink, 3000);
   await loadCached();
+  await loadCommunity();
   home();
   qInput.focus();
 })();
