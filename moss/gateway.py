@@ -7,6 +7,13 @@ manifest / chunk / NACK / DONE transfer page_transfer.py uses.
 Requests are served one at a time, in order. Two people asking at once get
 queue positions rather than two interleaved transfers fighting over the same
 few kilobits per second.
+
+Community pages (with a PageStore): a "community page" request is answered
+with the stored page file, signed by its author; an "upload" request runs
+the transfer the other way. The vault answers the offer with SACCEPT, the
+reader sends UCHUNKs, the vault asks for what's missing with UNACKs (the
+reader's own repair loop, mirrored), then checks the page and answers
+SRESULT. Uploads wait in the same queue as reads.
 """
 
 from __future__ import annotations
@@ -14,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import time
 import zlib
+
+from . import pages as PG
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -43,6 +52,14 @@ class Session:
     seal: "S.VaultSession | None" = None  # encrypted request: reply encrypted too
     error_reply: bytes | None = None    # the error we answered with, to repeat if it was lost
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # uploads
+    offer: tuple[str, int, int] | None = None     # address, version, size
+    accept: bytes | None = None         # our SACCEPT, repeated if it was lost
+    upload_key: bytes | None = None
+    utotal: int = 0
+    uchunks: dict = field(default_factory=dict)
+    poked: bool = False                 # the reader re-sent its request mid-upload
+    final: bytes | None = None          # our SRESULT, repeated if it was lost
 
 
 class Gateway:
@@ -50,7 +67,9 @@ class Gateway:
                  wait: float = 30.0, settle: float = 1.6, max_queue: int = 6,
                  log: Callable[[str], None] = print, keys: "S.VaultKeys | None" = None,
                  pad_sizes: bool = False, log_queries: bool = False,
-                 capsule_every: int = 50):
+                 capsule_every: int = 50, pages=None, upload_quiet: float = 6.0,
+                 upload_idle: float = 120.0, max_nacks: int = 14,
+                 nack_spacing: float = 1.0):
         """gap     seconds between datagrams (airtime pacing)
         wait    how long to listen for NACK/DONE after the last chunk; must be
                 comfortably longer than the client's --quiet
@@ -66,6 +85,9 @@ class Gateway:
         capsule_every  repeat the capsule every N spores (and once more right
                     away), so a reader that missed it can pick it up without
                     asking; costs ~2-3% airtime. 0 = send it once.
+        pages       a PageStore: serve community pages and take uploads
+        upload_quiet  seconds of silence mid-upload before asking for what's missing
+        upload_idle   give up on an upload after this long with nothing heard
         """
         self.tx, self.source = tx, source
         self.gap, self.rounds, self.wait, self.settle = gap, rounds, wait, settle
@@ -73,6 +95,9 @@ class Gateway:
         self.log = log
         self.keys, self.pad_sizes, self.log_queries = keys, pad_sizes, log_queries
         self.capsule_every = capsule_every
+        self.pages = pages
+        self.upload_quiet, self.upload_idle = upload_quiet, upload_idle
+        self.max_nacks, self.nack_spacing = max_nacks, nack_spacing
         self._last_hello = 0.0
         self._answered: list[bytes] = []            # recent WHOIS already answered
         self.sessions: dict[int, Session] = {}
@@ -146,6 +171,13 @@ class Gateway:
                     s.reported.update(missing)
                     s.last_nack = time.monotonic()
                     s.wake.set()
+            elif kind == P.UCHUNK:
+                rid, index, payload = P.parse_chunk(raw)
+                s = self.sessions.get(rid)
+                if s and s.kind == P.KIND_UPLOAD and s.state == "receiving" and index < s.utotal:
+                    s.uchunks.setdefault(index, payload)
+                    s.heard = time.monotonic()
+                    s.wake.set()
             elif kind == P.DONE:
                 s = self.sessions.get(P.peek_tid(raw))
                 if s:
@@ -173,10 +205,16 @@ class Gateway:
         existing = self.sessions.get(rid)
         if existing:
             # The client didn't hear us. Say it again rather than start over.
-            self.log(f"  [{rid}] repeated request, re-sending the capsule")
             existing.heard = time.monotonic()      # the client is still there
+            if existing.kind == P.KIND_UPLOAD and existing.state == "receiving":
+                existing.poked = True              # it's waiting on us: answer from the loop
+                existing.wake.set()
+                return
+            self.log(f"  [{rid}] repeated request, answering again")
             existing.wake.set()
-            if existing.error_reply:
+            if existing.final:
+                await self.tx.send(existing.final)
+            elif existing.error_reply:
                 await self.tx.send(existing.error_reply)
             elif existing.manifest:
                 await self.tx.send(existing.manifest)
@@ -184,13 +222,32 @@ class Gateway:
                 await self.tx.send(self._status_for(existing))
             return
 
+        offer = None
+        if kind == P.KIND_UPLOAD:
+            refusal = None
+            if seal is None:
+                refusal = "uploads must be encrypted"
+            elif self.pages is None:
+                refusal = "this Seed Vault doesn't keep community pages"
+            else:
+                try:
+                    address, version, size = query.split()
+                    offer = (address, int(version), int(size))
+                    refusal = self.pages.check_offer(*offer)
+                except ValueError:
+                    refusal = "bad upload offer"
+            if refusal:
+                self.log(f"[{rid}] upload refused: {refusal}")
+                await self.tx.send(self._error(rid, refusal, seal))
+                return
+
         self._purge()
         if self.queue.qsize() >= self.max_queue:
             self.log(f"  [{rid}] refused, queue full")
             await self.tx.send(self._error(rid, "Seed Vault busy, try again soon", seal))
             return
 
-        session = Session(rid, kind, query.strip(), seal=seal)
+        session = Session(rid, kind, query.strip(), seal=seal, offer=offer)
         self.sessions[rid] = session
         self.log(f"[{rid}] {self._what(session)}")
         await self.queue.put(session)
@@ -225,6 +282,9 @@ class Gateway:
                 session.state = "finished"
 
     async def _serve(self, s: Session) -> None:
+        if s.kind == P.KIND_UPLOAD:
+            await self._receive_upload(s)
+            return
         if s.resume is not None:
             to_send, s.resume = s.resume, None
             s.state = "sending"
@@ -239,6 +299,11 @@ class Gateway:
                 if not results:
                     raise SourceError("nothing found")
                 name, content = "results", P.encode_results(results)
+            elif s.kind == P.KIND_PAGE:
+                content = self.pages.get(s.query) if self.pages is not None else None
+                if content is None:
+                    raise SourceError("this Seed Vault doesn't have a page at that address")
+                name = "page"
             else:
                 title, text = await self.source.article(s.query)
                 name, content = title, text.encode()
@@ -324,3 +389,78 @@ class Gateway:
             self.log(f"[{s.rid}] repair {rnd}: bare patch of {len(to_send)} spore(s), resending")
         self.log(f"[{s.rid}] paused after {self.rounds} rounds")
         s.paused = True
+
+    # ------------------------------------------------------------ uploads
+
+    async def _receive_upload(self, s: Session) -> None:
+        """The reader sends, we repair: the client's loop, mirrored."""
+        address, version, size = s.offer
+        refusal = self.pages.check_offer(address, version, size)   # things may have changed
+        if refusal:
+            s.error_reply = self._error(s.rid, refusal, s.seal)
+            await self.tx.send(s.error_reply)
+            return
+        wire_len = size + S.TAG
+        s.accept, s.upload_key = s.seal.accept_upload(wire_len)
+        s.utotal = -(-wire_len // P.CHUNK_BYTES)
+        s.state = "receiving"
+        what = f" ({address} v{version})" if self.log_queries else ""
+        self.log(f"[{s.rid}] receiving an upload of {s.utotal} spore(s){what}")
+        await self.tx.send(s.accept)
+        s.heard = last_ask = time.monotonic()
+        fruitless, have_at_ask = 0, 0
+
+        async def ask() -> None:
+            if not s.uchunks:
+                await self.tx.send(s.accept)          # it may never have heard us
+                return
+            missing = [i for i in range(s.utotal) if i not in s.uchunks]
+            batches = [missing[i:i + P.NACK_ROOM] for i in range(0, len(missing), P.NACK_ROOM)]
+            for n, batch in enumerate(batches):
+                if n:
+                    await asyncio.sleep(self.nack_spacing)
+                await self.tx.send(P.build_unack(s.rid, batch))
+
+        while len(s.uchunks) < s.utotal:
+            s.wake.clear()
+            if s.poked:
+                s.poked = False
+                await ask()
+                last_ask = time.monotonic()
+                continue
+            try:
+                await asyncio.wait_for(s.wake.wait(), 0.25)
+            except asyncio.TimeoutError:
+                pass
+            now = time.monotonic()
+            if now - s.heard > self.upload_idle:
+                self.log(f"[{s.rid}] upload abandoned: nothing heard from the reader")
+                s.final = s.seal.upload_result(s.upload_key, False, "upload timed out; try again")
+                return
+            if now - max(s.heard, last_ask) >= self.upload_quiet:
+                fruitless = 0 if len(s.uchunks) > have_at_ask else fruitless + 1
+                have_at_ask = len(s.uchunks)
+                if fruitless > self.max_nacks:
+                    self.log(f"[{s.rid}] upload abandoned at {len(s.uchunks)}/{s.utotal} spores")
+                    s.final = s.seal.upload_result(s.upload_key, False, "upload incomplete; try again")
+                    return
+                await ask()
+                last_ask = time.monotonic()
+
+        wire = b"".join(s.uchunks[i] for i in range(s.utotal))[:wire_len]
+        try:
+            data = s.seal.open_upload(s.upload_key, wire)
+            page = self.pages.store(data, address, version, size)
+            stored, message = True, f"stored v{page.version}"
+            self.log(f"[{s.rid}] stored a community page "
+                     f"({'deletion, ' if page.deleted else ''}{s.utotal} spores){what}")
+        except S.SealError:
+            stored, message = False, "the page was damaged on the way; try again"
+            self.log(f"[{s.rid}] upload damaged in transit")
+        except PG.PageError as exc:
+            stored, message = False, str(exc)
+            self.log(f"[{s.rid}] upload refused: {exc}")
+        s.final = s.seal.upload_result(s.upload_key, stored, message)
+        await self.tx.send(s.final)
+        await asyncio.sleep(self.gap)
+        await self.tx.send(s.final)                # twice: a lost result means a re-upload

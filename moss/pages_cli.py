@@ -12,8 +12,12 @@
     python -m moss page check ~/.moss/outbox/<file>.mosspage
     python -m moss page mine
 
-Finished pages go to ~/.moss/outbox/, ready for uploading (coming in the
-next stage).
+    python -m moss page upload                                      # everything in the outbox
+    python -m moss page upload moss:<id>/water-filters              # just that page
+    python -m moss page open moss:<id>/water-filters                # read a page by its address
+
+Finished pages wait in ~/.moss/outbox/ until uploaded; sent ones move to
+~/.moss/outbox/sent/.
 """
 
 from __future__ import annotations
@@ -184,6 +188,10 @@ async def cmd_page(args) -> int:
                           f"moss:{ident.id}/{name}  {info['title']}")
             if not any_:
                 print("you haven't made any pages yet: moss page make FILE.md")
+        elif args.action == "upload":
+            return await _upload(args)
+        elif args.action == "open":
+            return await _open(args)
         elif args.action == "history":
             ident = a.owner_of(args.address)
             _, name = PG.parse_address(args.address)
@@ -193,16 +201,73 @@ async def cmd_page(args) -> int:
     return 0
 
 
-def add_parsers(sub) -> None:
+async def _upload(args) -> int:
+    from .cli import TermProgress, connect
+    from .client import MossError
+    pending = PG.outbox_pending()
+    target = args.address
+    if target and Path(target).expanduser().is_file():
+        page = PG.load(Path(target).expanduser().read_bytes())
+        pending = [(Path(target).expanduser(), page)]
+    elif target:
+        PG.parse_address(target)
+        pending = [(f, p) for f, p in pending if p.address == target]
+        if not pending:
+            raise PG.PageError(f"nothing waiting in the outbox for {target}")
+    if not pending:
+        print("the outbox is empty: nothing to upload (make a page first: moss page make FILE.md)")
+        return 0
+    failed = 0
+    async with connect(args) as (client, info):
+        for f, page in pending:
+            title = page.record["title"] or ("deletion" if page.deleted else page.address)
+            print(f"uploading {title!r} v{page.version} ({page.spores} spores)...")
+            show = TermProgress()
+            try:
+                message = await client.upload(f.read_bytes(), on_progress=show)
+            except MossError as exc:
+                show.finish()
+                failed += 1
+                print(f"  not uploaded: {exc}")
+                continue
+            show.finish()
+            PG.mark_sent(page)
+            print(f"  {message}: {page.address}")
+    return 1 if failed else 0
+
+
+async def _open(args) -> int:
+    from .cli import TermProgress, connect, show_article
+    from .client import MossError
+    async with connect(args) as (client, info):
+        show = TermProgress()
+        try:
+            got = await client.page(args.address, refresh=args.refresh, on_progress=show)
+        except MossError as exc:
+            show.finish()
+            print(f"error: {exc}")
+            return 1
+        show.finish()
+    page = got.page
+    print(f"{page.describe()}\n  signature checked{' (saved copy)' if got.from_cache else ''}\n")
+    if page.deleted:
+        print("This page was deleted by its author.")
+    else:
+        show_article(page.text(), not args.no_pager)
+    return 0
+
+
+def add_parsers(sub, client_parent=None) -> None:
     au = sub.add_parser("author", help="your author identities for community pages")
     au.add_argument("action", choices=["list", "new", "use", "rename", "backup", "restore"],
                     nargs="?", default="list")
     au.add_argument("words", nargs="*")
     au.set_defaults(fn=cmd_author)
 
-    pg = sub.add_parser("page", help="make, update, restore, delete or check community pages")
+    pg = sub.add_parser("page", parents=[client_parent] if client_parent else [],
+                        help="make, upload, open, update, restore, delete or check community pages")
     pg.add_argument("action", choices=["make", "update", "restore", "delete", "check", "mine",
-                                       "history"])
+                                       "history", "upload", "open"])
     pg.add_argument("address", nargs="?", metavar="FILE_OR_ADDRESS",
                     help="a .md file (make), a page address, or a .mosspage file (check)")
     pg.add_argument("extra", nargs="?", metavar="FILE_OR_VERSION")
@@ -225,6 +290,6 @@ def fix_args(args) -> None:
         args.file = args.address
         if not args.file:
             raise SystemExit("usage: moss page make FILE.md")
-    if getattr(args, "fn", None) is cmd_page and args.action not in ("make", "mine") \
+    if getattr(args, "fn", None) is cmd_page and args.action not in ("make", "mine", "upload") \
             and not args.address:
         raise SystemExit(f"usage: moss page {args.action} ADDRESS")

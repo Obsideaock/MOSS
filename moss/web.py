@@ -74,6 +74,18 @@ class App:
                     "fetched_at": out.fetched_at,
                     "results": [{"title": r.title, "blurb": r.blurb}
                                 for r in out.results]}
+            elif job.kind == "page":
+                out = await self.client.page(job.query, refresh, on_progress)
+                pg, r = out.page, out.page.record
+                job.result = {
+                    "title": r["title"] or "Deleted page", "text": "" if pg.deleted else pg.text(),
+                    "from_cache": out.from_cache, "fetched_at": out.fetched_at,
+                    "elapsed": job.progress.get("elapsed", 0),
+                    "packets": job.progress.get("total", 0),
+                    "page": {"address": pg.address, "author": r["author"] or "anonymous",
+                             "fingerprint": pg.fingerprint, "version": pg.version,
+                             "visibility": r["visibility"], "deleted": pg.deleted,
+                             "signed": r["time"], "about": r["about"]}}
             else:
                 out = await self.client.article(job.query, refresh, on_progress)
                 job.result = {
@@ -185,6 +197,11 @@ def make_handler(app: App):
                 if not q:
                     return self._json({"error": "type something to search for"}, 400)
                 self._json(app.submit("search", q, bool(body.get("refresh"))).to_dict())
+            elif path == "/api/page":
+                a = str(body.get("address", "")).strip()
+                if not a.startswith("moss:"):
+                    return self._json({"error": "that isn't a page address (moss:...)"}, 400)
+                self._json(app.submit("page", a, bool(body.get("refresh"))).to_dict())
             elif path == "/api/article":
                 t = str(body.get("title", "")).strip()
                 if not t:

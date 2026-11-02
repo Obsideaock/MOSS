@@ -150,7 +150,11 @@ def _finish(page: PG.Page) -> None:
     if page.spores > PG.DEFAULT_CAP and not page.deleted:
         ui.warn(f"over the usual {PG.DEFAULT_CAP}-spore cap: a vault will refuse it unless its "
                 f"owner raised the cap or approves it from the review queue")
-    ui.note(f"waiting in the outbox for upload (coming in the next update): {path}")
+    ui.note(f"saved in the outbox: {path}")
+    if ui.confirm("Upload it to the Seed Vault now?", True):
+        run_cli(["page", "upload", page.address])
+    else:
+        ui.note("Upload it later from My pages → Upload to the Seed Vault.")
 
 
 def new_page() -> None:
@@ -257,10 +261,34 @@ def check_page_file() -> None:
     ui.pause()
 
 
+def upload_pages() -> None:
+    pending = PG.outbox_pending()
+    if not pending:
+        ui.warn("nothing waiting to upload")
+        ui.pause()
+        return
+    choices = [ui.Choice(f"Everything waiting ({len(pending)} page{'s' if len(pending) != 1 else ''})", "__all")]
+    choices += [ui.Choice(f"{p.record['title'] or 'deletion'}  ·  v{p.version}  ·  {p.spores} spores",
+                          p.address) for _, p in pending]
+    pick = ui.choose("Upload which?", choices)
+    run_cli(["page", "upload"] + ([] if pick == "__all" else [pick]))
+
+
+def open_by_address() -> None:
+    address = ui.text("Page address (moss:...):",
+                      validate=lambda s: s.strip().startswith("moss:") or "addresses start with moss:")
+    run_cli(["page", "open", address.strip()])
+
+
 def pages_menu() -> None:
-    _loop(lambda: ui.header("My pages", "Pages you write, signed with your identity. Uploading "
-                                        "to the Seed Vault arrives in the next update."),
-          lambda: [("New page", new_page), ("Update a page", update_page),
+    def head():
+        n = len(PG.outbox_pending())
+        ui.header("My pages", "Pages you write, signed with your identity.",
+                  f"{n} waiting to upload" if n else "nothing waiting to upload")
+
+    _loop(head,
+          lambda: [("New page", new_page), ("Upload to the Seed Vault", upload_pages),
+                   ("Update a page", update_page),
                    ("Restore an old version", restore_page), ("Delete a page", delete_page),
                    ("List my pages", list_pages), ("Check a page file", check_page_file)])
 
@@ -308,7 +336,7 @@ def identities_menu() -> None:
 # ---------------------------------------------------------------- radio check
 
 def radio_menu() -> None:
-    port = config.load().get("port")
+    port = None                 # whatever setup saved: a USB port or a Bluetooth radio
 
     def send():
         n = int(ui.text("How many pings?", "10", validate=lambda s: s.isdigit() and 0 < int(s) <= 100))
@@ -331,7 +359,10 @@ def radio_menu() -> None:
                             *(["The Seed Vault pauses during the check and starts again after."]
                               if config.load().get("role") == "vault" else [])),
           lambda: [("Listen for pings", listen), ("Send pings", send),
-                   ("Show this radio's settings", info)])
+                   ("Show this radio's settings", info)]
+          + ([] if config.load().get("role") == "vault" else
+             [("Full test with the Seed Vault (search, upload, read back)",
+               lambda: run_cli(["selftest"]))]))
 
 
 # ---------------------------------------------------------------- shared items
@@ -363,7 +394,7 @@ def reader_menu() -> None:
     def head():
         cfg = config.load()
         ui.header("MOSS · reader",
-                  f"radio   {cfg.get('port') or 'not set (Settings → Radio port)'}",
+                  f"radio   {config.radio_label(cfg)}",
                   f"vault   {_vault_fp()}",
                   f"version {updater.current()}")
 
@@ -384,9 +415,12 @@ def reader_menu() -> None:
 
     def settings():
         def port():
-            p = setup._pick_port(ui, config.load().get("port"), "reader")
-            config.update(port=p)
-            ui.ok(f"radio port: {p or 'none'}")
+            link = setup._pick_link(ui, config.load())
+            if link is not None and setup._check_radio(ui, link):
+                setup._save_reader(ui, link, False)
+            elif link is None:
+                config.update(port=None, ble=None, pin=None)
+                ui.ok("no radio set")
 
         def scope():
             s = ui.text("MeshCore region to keep traffic inside (blank for none):",
@@ -402,13 +436,14 @@ def reader_menu() -> None:
                 ring.forget()
                 ui.ok("forgotten")
 
-        _loop(lambda: None, lambda: [("Radio port", port), ("Region scope", scope),
+        _loop(lambda: None, lambda: [("Radio (USB or Bluetooth)", port), ("Region scope", scope),
                                      ("Trusted Seed Vault", trust),
                                      ("Run the whole setup again", lambda: setup.run())])
 
     _loop(head, lambda: [
         ("Open the reader in your browser", lambda: run_cli(["web"], wait=False)),
         ("Search from here", search),
+        ("Open a page by address", open_by_address),
         ("Read saved articles", saved),
         ("My pages", pages_menu),
         ("Identities", identities_menu),

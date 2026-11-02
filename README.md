@@ -80,10 +80,14 @@ Pi (Seed Vault), in a terminal:
 curl -sSL https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.sh | bash
 ```
 
-Laptop (reader), in PowerShell:
+Laptop (reader), in PowerShell on Windows:
 ```powershell
 irm https://raw.githubusercontent.com/Obsideaock/MOSS/main/install.ps1 | iex
 ```
+
+Mac or Linux laptop: the same command as the Pi, in Terminal. (On a Mac,
+Python 3.10+ is needed: `brew install python git` if the installer says the
+one you have is too old. The radio shows up as `/dev/cu.usbserial-...`.)
 
 **Then just type `moss`.** You get a menu for everything: the reader, search,
 your pages and identities, a radio range check, settings and updates on a
@@ -259,6 +263,12 @@ Set these from `moss` → *Extra options*, or put them in `MOSS_EXTRA=` in
 | `--log-queries` | Write the titles of encrypted requests to the log. Off: the Pi keeps no record of what people read. |
 | `--name "Boulder Seed Vault"` | The name readers see when they first meet this vault. |
 | `--keys DIR` | Where the keys live (default `~/.moss/seed-vault`). |
+| `--page-cap 250` | Biggest community page accepted, in spores. |
+| `--uploads-per-author 3` | Uploads per author per day. |
+| `--upload-budget 2000` | Spores of uploads per day for the whole vault. |
+| `--page-storage-mb 2048` | Room for community pages. |
+| `--no-uploads` | Serve the community pages already here, but take no new ones. |
+| `--pages DIR` | Where community pages are kept (default `~/.moss/seed-vault/pages`). |
 
 ---
 
@@ -300,6 +310,33 @@ moss trust                                  # which Seed Vault is trusted
 
 `python -m moss ...` from inside the MOSS folder (with `.venv` active)
 still works exactly the same.
+
+### Bluetooth radios (T1000-E and others)
+
+A reader can reach its radio over Bluetooth instead of a USB cable: same
+MOSS, same encryption, same watchdog. It's the way to go with a T1000-E, or
+when a computer won't show the radio's COM port.
+
+1. The radio needs MeshCore's normal **Bluetooth companion** firmware (the
+   one the phone app talks to).
+2. **Disconnect it from the MeshCore phone app** (or turn the phone's
+   Bluetooth off). A radio takes one Bluetooth connection at a time.
+3. Run `moss setup` (or *Settings → Radio* in the menu), pick **Bluetooth
+   instead** at the port question, and choose the radio from the scan
+   (it shows up as `MeshCore-<its name>`).
+4. If your computer asks for a pairing PIN, it's in the MeshCore app's
+   settings for that radio (often `123456`). Setup offers to retry with a
+   PIN if the first try fails. Pairing it once in the computer's own
+   Bluetooth settings also works.
+
+From then on everything uses it automatically. By hand: `moss web --ble`
+(the first MeshCore radio found), `moss web --ble MeshCore-Stern`, or
+`--ble <address>`; add `--pin 123456` if needed. `--port COM12` switches
+back to a cable for that one run.
+
+Bluetooth adds a little delay per message, which is small next to the
+airtime itself. On Linux it needs BlueZ (standard on desktops and on
+Raspberry Pi OS). The Seed Vault itself stays on USB.
 
 ### Updates and branches
 
@@ -459,20 +496,20 @@ read is readable only by you and the Seed Vault.**
 
 ### Community pages (in progress)
 
-Anyone will be able to publish their own pages to a Seed Vault. The full
+Anyone can publish their own pages to a Seed Vault. The full
 design (visibility, ranking, the review queue, what vault owners can and
 can't do, safety requirements) is in the *MOSS Community Pages Design* doc.
 It's being built in five stages:
 
-1. **Identities and signed pages** ← done (this version)
-2. Uploading to a Seed Vault
-3. Reading and finding pages (search, following, author pages)
+1. **Identities and signed pages** ← done
+2. **Uploading to a Seed Vault, and opening a page by its address** ← done (this version)
+3. Finding pages (search, following, author pages)
 4. Locked (password-protected) pages
 5. Owner tools: removal log, review queue, quiet-hours scheduling
 
-Right now you can make identities and signed pages on the laptop. Nothing
-is sent over the radio yet; finished pages wait in `~/.moss/outbox/` for
-stage 2.
+Right now you can make pages, upload them, and read any page whose address
+you have. Search for community pages comes with stage 3, so for now share
+addresses directly (MeshCore chat, paper, out loud).
 
 ### Identities
 
@@ -544,6 +581,56 @@ python -m moss page check ~/.moss/outbox/<file>.mosspage --show
 Every change is a new, higher version. Readers and vaults refuse a lower
 version than one they've seen, so nobody can replay an old signed copy to
 undo your fix. You can always bring old text back yourself with `restore`.
+
+### Uploading and opening pages
+
+```bash
+moss page upload                                  # everything waiting in the outbox
+moss page upload moss:<id>/water-filters          # just that page
+moss page open moss:<id>/water-filters            # read any page by its address
+```
+
+Or from the menu: *My pages → Upload to the Seed Vault* (a new page offers
+to upload straight away), and *Open a page by address*. In the browser
+reader, paste a `moss:` address into the search box.
+
+How an upload goes:
+
+1. Your reader sends an **offer**: the address, version and size, sealed
+   to the vault like any request. A listener learns nothing, not even that
+   it's an upload.
+2. The vault checks it against its limits and answers at once if it can't
+   take it ("too big: 400 spores, this Seed Vault's cap is 250"), so a
+   refusal costs no airtime.
+3. Otherwise it accepts. Your reader sends the page as spores, encrypted
+   with a one-time key from both sides. The vault asks for any it missed
+   (the same bare-patch repair as reading, in reverse), checks the author's
+   signature and the version, stores the page and says "stored v2".
+
+Uploads wait in the same queue as reads. After a successful upload the page
+file moves to `~/.moss/outbox/sent/`. A failed one stays in the outbox to
+try again.
+
+Opening a page fetches it like an article, then checks the author's
+signature, that it's the page asked for, and that it isn't older than a
+version you've seen before. A page that fails any of these is blight and
+isn't kept.
+
+What the Seed Vault takes (it can change these; see
+[Seed Vault options](#seed-vault-options-worth-knowing)):
+
+| Limit | Default |
+|---|---|
+| Biggest page | 250 spores (about 39 KB compressed) |
+| Uploads per author per day | 3 (new pages, updates and deletions all count) |
+| All uploads per day | 2,000 spores, about 55 minutes of airtime |
+| Room for community pages | 2 GB |
+
+The vault keeps the newest version of each page, exactly as its author
+signed it, in `~/.moss/seed-vault/pages/`. A deletion is kept too, so an old
+copy can't be uploaded again to bring the page back. Its log says "stored a
+community page (12 spores)" without saying which, unless it runs with
+`--log-queries`.
 
 ### What makes a page trustworthy
 
@@ -710,8 +797,16 @@ people's transfers.
 | 10 | SREQUEST (sealed request) | type 1, id 2, one-time key 32, sealed 112, check 16 (always 163) | reader → vault |
 | 11 | SCAPSULE (sealed capsule) | type 1, id 2, one-time key 32, sealed sizes and hash 19, check 16 | vault → reader |
 | 12 | SERROR (sealed error) | type 1, id 2, sealed message, check 16 | vault → reader |
+| 13 | SACCEPT (upload accepted) | type 1, id 2, one-time key 32, sealed spores and length 6, check 16 | vault → reader |
+| 14 | UCHUNK (upload spore) | type 1, id 2, number 2, data up to 158 | reader → vault |
+| 15 | UNACK (upload bare patch) | type 1, id 2, count 1, numbers 2 each | vault → reader |
+| 16 | SRESULT (upload result) | type 1, id 2, sealed stored-or-not and message, check 16 | vault → reader |
 
-With encryption on (the normal case) only types 2, 3, 4, 6 and 8–12 go out.
+A sealed request carries a *kind*: 1 search, 2 article, 3 community page
+(the query is its address), 4 upload (the query is the offer: address,
+version, size).
+
+With encryption on (the normal case) only types 2, 3, 4, 6 and 8–16 go out.
 Types 1, 5 and 7 are kept for `--plain` and for the older tools.
 
 The 5-byte spore header (type, ID, number) is what leaves 158 of the 163
@@ -910,6 +1005,8 @@ library say, for chasing anything stranger.
 | `page came through blighted` | Damaged or tampered page | Try again. Repeated blight with no interference around is worth investigating. |
 | `all N channel slots on this radio are in use` | No free slot to create #moss in | Remove a channel in the MeshCore app, or add `#moss` there yourself. |
 | `slot N is a channel called #moss with a different key` | Someone's private channel shares the name | Harmless; MOSS uses its own slot. Rename that channel if it's confusing. |
+| `couldn't reach the radio ... over Bluetooth` | Radio off, too far, or still connected to the phone app | Disconnect the phone app, bring it closer, try again; if asked, the PIN is in the MeshCore app (often 123456). |
+| No Bluetooth radios found in setup | Computer's Bluetooth off, or radio not advertising | Turn Bluetooth on; restart the radio; make sure it runs the Bluetooth companion firmware. |
 | `moss` isn't recognised | The terminal was open before installing | Open a new terminal (on Linux, or log out and in). |
 | `this copy has commits GitHub doesn't` on update | Local commits in the MOSS folder | Push them, or `git status` to sort it out; nothing was changed. |
 | `no such port` | Wrong `--port` | The message lists the ports found; on the Pi use the full `/dev/serial/by-id/...` path. |
@@ -917,6 +1014,10 @@ library say, for chasing anything stranger.
 | Status bar red, *reconnecting…* | Radio unplugged or laptop just woke | Wait or replug; it recovers by itself. |
 | `radio link lost: ...` and it never comes back | The reason is in the message; `still can't reopen COM12` lines say why reopening fails | Close anything else using the port; replug; run with `--debug` and look at the last lines. |
 | `the signing key doesn't own this address` / `signature doesn't match` | A page that was forged or altered | Don't trust it. |
+| `too big: N spores, this Seed Vault's cap is 250` | The page is over the vault's size cap | Split it into two pages linked to each other, or ask the vault's owner. |
+| `uploads for today are used up` / `airtime for today is used up` | A daily upload limit | Try tomorrow; the page stays in the outbox. |
+| `already on this Seed Vault` | That version was uploaded before | Nothing to do. |
+| `doesn't have a page at that address` | Not on this vault (or a typo) | Check the address; it may be on another vault. |
 | `older version ... refused` | Someone (or a vault) offered an older copy of a page you've seen newer | Nothing to do; you keep the newer one. |
 | `reading a .zim needs libzim` | libzim not installed | `pip install -r requirements.txt` (or `pip install libzim`). |
 | `library not found` in the Pi's service log | USB stick not mounted | Plug it in; see [USB stick](#usb-stick). |
@@ -953,9 +1054,13 @@ Run `python -m moss <command> --help` for every option.
 | `page update/restore/delete/history ADDRESS` | Laptop | New versions of your pages. |
 | `page check FILE.mosspage [--show]` | Anywhere | Verify a page file's signature and print it. |
 | `page mine` | Laptop | Everything you've published. |
+| `page upload [ADDRESS or FILE]` | Laptop | Upload what's waiting in the outbox (or one page). |
+| `page open ADDRESS [--refresh]` | Laptop | Read a community page by its address. |
+| `selftest` | Laptop | End-to-end test with the Seed Vault: search, upload, read back, replay, delete. |
 
-Options shared by radio commands: `--port`, `--channel-name` (default
-`#moss`), `--scope`, `--cache`, `--debug`. Reader options: `--refresh` (ask over radio
+Options shared by radio commands: `--port`, `--ble [ADDRESS]` and `--pin`
+(Bluetooth instead of USB), `--channel-name` (default `#moss`), `--scope`,
+`--cache`, `--debug`. Reader options: `--refresh` (ask over radio
 even if saved), `--quiet` (seconds of silence before asking for bare
 patches, default 6), `--idle`, `--plain`, `--no-pager`, and `--sim FOLDER_OR_ZIM`
 (with `--sim-loss`, `--sim-airtime`, `--pad-sizes`, `--no-links`) for a
@@ -974,12 +1079,16 @@ is a `Gateway` setting in code (`capsule_every`).
 | `~/.moss/cache/index.json` | Laptop | Titles, sizes, when fetched |
 | `~/.moss/cache/searches.json` | Laptop | Past searches and their results |
 | `~/.moss/vault.json` | Laptop | The trusted Seed Vault's public keys and fingerprint |
-| `~/.moss/config.json` | Both | What setup remembered: reader or vault, radio port, channel, scope, update branch |
+| `~/.moss/config.json` | Both | What setup remembered: reader or vault, radio port or Bluetooth radio (and PIN), channel, scope, update branch |
 | Browser storage | Laptop | The *Read later* list and light/dark theme |
 | `~/.moss/authors/<id>/key.pem` | Laptop | An author identity's private signing key (readable only by you; back it up) |
 | `~/.moss/authors/<id>/pages.json`, `history/` | Laptop | Pages you published with it, and every version's text |
 | `~/.moss/authors/default` | Laptop | Which identity `page make` uses |
 | `~/.moss/outbox/*.mosspage` | Laptop | Signed pages waiting to be uploaded |
+| `~/.moss/outbox/sent/` | Laptop | Pages already uploaded |
+| `~/.moss/cache/pages/` | Laptop | Community pages you've opened, as signed by their authors |
+| `~/.moss/seed-vault/pages/<author id>/*.mosspage` | Pi | Community pages the vault carries (newest version of each) |
+| `~/.moss/seed-vault/pages/uploads.json` | Pi | Today's upload counts per author id, for the limits (nothing older than yesterday) |
 | `~/.moss/seen-pages.json` | Laptop | Newest version seen of each page, so old copies can't be replayed |
 | `~/.moss/seed-vault/x25519.pem`, `ed25519.pem` | Pi | The Seed Vault's private keys (readable only by its user) |
 | `/etc/moss/gateway.env` | Pi | Service settings |
@@ -1008,6 +1117,20 @@ including:
   unencrypted it recovers everything, encrypted it recovers nothing;
 - a fake Seed Vault, a forged spore, a changed vault key, pinned
   fingerprints, padding;
+- **uploads and community pages** over a lossy simulated radio:
+  - round trips at 25–35% loss, including lost acceptances, lost results
+    and every spore lost once;
+  - an eavesdropper who must not see the text, title, address, author or
+    key of an uploaded or read page;
+  - vault logs that don't name pages;
+  - every limit (size, per author, daily budget across many identities,
+    storage, uploads off);
+  - a forged page and a page that doesn't match its offer, both refused
+    after transfer;
+  - replays of old versions and deleted pages refused;
+  - a vault serving an older copy, or a tampered one, refused by the reader;
+  - the hardware self-test run end to end, including catching a vault that
+    wrongly accepts replays;
 - **install and update**: settings files rewritten without losing comments,
   `moss update` against real git repositories (moving forward, stashing
   local edits, refusing local commits, switching branches), setup keeping
@@ -1024,6 +1147,30 @@ including:
   channels ignored, scopes);
 - the article converter against real Wikipedia pages from Kiwix's own test
   library (math, links, tables, infoboxes) and the mini test library.
+
+### Testing on your hardware
+
+Two levels, both from the laptop with the Seed Vault running as normal (and
+both machines on the same MOSS version: `moss update` on each):
+
+1. **Can the radios hear each other?** `moss radio-check listen` on the Pi
+   (it pauses the vault for the test) and `moss radio-check send` on the
+   laptop, or *Radio check* in the menu on both. Ten numbered pings; the Pi
+   shows each one that arrives with its signal-to-noise ratio.
+2. **Does everything work end to end?** `moss selftest` on the laptop (or
+   `python tools/hardware_test.py`, or *Radio check → Full test with the
+   Seed Vault*). Over the real radios it:
+   1. searches;
+   2. uploads a throwaway unlisted test page from a throwaway identity;
+   3. reads it back and compares it byte for byte;
+   4. uploads and reads back a second version;
+   5. checks the vault refuses the old version when sent again;
+   6. deletes the page.
+
+   Each step prints PASS or FAIL with how long it took. Expect a few minutes.
+
+`moss selftest --sim TestExamples` runs the same steps over the simulated
+radio, no hardware needed; the unit tests run it too.
 
 Hardware scripts in `tools/` (they predate `#moss` and take a slot number):
 `ping_test.py` (send numbered chat messages; `--channels` lists slots),
@@ -1089,7 +1236,11 @@ thing.
 
 Ideas discussed for later:
 
-- **Community pages, stages 2–5** (see [above](#community-pages-in-progress)).
+- **Community pages, stages 3–5** (see [above](#community-pages-in-progress)).
+- **Searching across vaults**: pages that only live on another vault, found
+  through shared catalogues between vaults (see the design doc).
+- **Reader + Seed Vault devices**: a desktop with a radio that reads and also
+  serves others at set hours.
 - **Page types**: boards/forums (fetch only what's new), status pages
   broadcast once to everyone (signed, unencrypted), maps (base maps
   preloaded, small layers of points over the air).

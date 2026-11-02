@@ -26,6 +26,9 @@ MOSS_DATA_TYPE = 0xFF01
 MAX_DATAGRAM = 163
 
 MANIFEST, CHUNK, NACK, DONE, REQUEST, STATUS, ERROR = 1, 2, 3, 4, 5, 6, 7
+# Uploads run the transfer the other way: the reader sends UCHUNKs and the
+# Seed Vault answers with UNACKs (same layouts as CHUNK and NACK).
+UCHUNK, UNACK = 14, 15
 
 CHUNK_HEADER = 5                              # type(1) + tid(2) + index(2)
 CHUNK_BYTES = MAX_DATAGRAM - CHUNK_HEADER     # 158 bytes of page per datagram
@@ -33,8 +36,9 @@ NACK_ROOM = (MAX_DATAGRAM - 4) // 2           # indices per NACK datagram
 
 FLAG_ZLIB = 1
 
-KIND_SEARCH, KIND_ARTICLE = 1, 2
-KIND_NAMES = {KIND_SEARCH: "search", KIND_ARTICLE: "article"}
+KIND_SEARCH, KIND_ARTICLE, KIND_PAGE, KIND_UPLOAD = 1, 2, 3, 4
+KIND_NAMES = {KIND_SEARCH: "search", KIND_ARTICLE: "article",
+              KIND_PAGE: "community page", KIND_UPLOAD: "upload"}
 
 ST_QUEUED, ST_FETCHING, ST_SENDING = 1, 2, 3
 
@@ -84,6 +88,16 @@ def parse_nack(raw: bytes) -> tuple[int, list[int]]:
     _, tid, count = struct.unpack("<BHB", raw[:4])
     return tid, [struct.unpack("<H", raw[4 + 2 * i:6 + 2 * i])[0]
                  for i in range(count)]
+
+
+def build_uchunk(tid: int, index: int, payload: bytes) -> bytes:
+    return struct.pack("<BHH", UCHUNK, tid, index) + payload
+
+
+def build_unack(tid: int, missing: list[int]) -> bytes:
+    chosen = missing[:NACK_ROOM]
+    return (struct.pack("<BHB", UNACK, tid, len(chosen))
+            + b"".join(struct.pack("<H", i) for i in chosen))
 
 
 def build_done(tid: int) -> bytes:

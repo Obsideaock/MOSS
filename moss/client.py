@@ -7,6 +7,10 @@
 Both calls check the local cache first. A cache hit returns immediately and
 uses no airtime; pass refresh=True to ask the gateway again.
 
+Community pages:
+    page   = await client.page("moss:<author id>/water-filters")   # verified Page
+    result = await client.upload(page_file_bytes)                  # "stored v2"
+
 on_progress receives a Progress snapshot whenever something changes and at
 least twice a second, so a UI can keep a countdown moving even when no
 datagram has arrived. That is what makes a minute-long wait feel like the
@@ -17,12 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+from pathlib import Path
 import random
 import time
 import zlib
 from dataclasses import dataclass, field
+from struct import error as struct_error
 from typing import Callable
 
+from . import pages as PG
 from . import protocol as P
 from . import seal as S
 from .cache import Cache, CachedArticle
@@ -36,7 +43,7 @@ class MossError(Exception):
 # ---------------------------------------------------------------- progress
 
 STAGES = ("requesting", "queued", "fetching", "receiving", "repairing",
-          "verifying", "done")
+          "verifying", "uploading", "checking", "done")
 
 
 @dataclass
@@ -78,6 +85,13 @@ class Fetched:
 class SearchOutcome:
     query: str
     results: list[SearchResult]
+    from_cache: bool = False
+    fetched_at: float = 0.0
+
+
+@dataclass
+class PageOutcome:
+    page: PG.Page
     from_cache: bool = False
     fetched_at: float = 0.0
 
@@ -206,7 +220,7 @@ class _Exchange:
 
 class Requester:
     def __init__(self, tx, quiet: float = 6.0, request_timeout: float = 25.0,
-                 request_attempts: int = 3, fetch_timeout: float = 120.0,
+                 request_attempts: int = 4, fetch_timeout: float = 120.0,
                  idle: float = 120.0, max_nacks: int = 14,
                  manifest_retry: float = 4.0, nack_spacing: float = 1.0,
                  keyring: "S.Keyring | None" = None,
@@ -291,6 +305,16 @@ class Requester:
                 return await self._run(ex, kind, query, report)
             finally:
                 self._active = None
+
+    async def upload(self, page: bytes, offer: str, on_progress: ProgressCallback | None = None,
+                     gap: float = 1.0) -> tuple[bool, str]:
+        """Send a page file to the Seed Vault. (stored?, the vault's message)"""
+        if self.keyring is None:
+            raise MossError("uploads must be encrypted; don't use --plain")
+        async with self._lock:
+            self._hello_result = ""
+            self._other_vault = ""
+            return await _upload(self, page, offer, on_progress or (lambda p: None), gap)
 
     # ------------------------------------------------------------ the state machine
 
@@ -459,15 +483,142 @@ class Requester:
             pass                        # best effort; the gateway times out anyway
 
 
+# ---------------------------------------------------------------- uploads
+
+class _UploadExchange:
+    """An upload in flight: we send the spores, the Seed Vault asks for
+    what it's missing (UNACK) and finally says whether it kept the page."""
+
+    def __init__(self, rid: int, seal: "S.ReaderSession"):
+        self.rid, self.seal = rid, seal
+        self.status: tuple[int, int] | None = None
+        self.error: str | None = None
+        self.accepted: dict | None = None
+        self.reaccepted = False          # the vault sent its acceptance again: it has nothing
+        self.missing: set[int] = set()
+        self.last_unack = 0.0
+        self.result: tuple[bool, str] | None = None
+        self.last_heard = time.monotonic()
+        self.changed = asyncio.Event()
+
+    def on_datagram(self, raw: bytes) -> None:
+        if len(raw) < 3 or P.peek_tid(raw) != self.rid:
+            return
+        kind = raw[0]
+        try:
+            if kind == S.SACCEPT:
+                if self.accepted is None:
+                    self.accepted = self.seal.open_accept(raw)
+                else:
+                    self.reaccepted = True
+            elif kind == P.UNACK and self.accepted is not None:
+                self.missing.update(i for i in P.parse_nack(raw)[1] if i < self.accepted["total"])
+                self.last_unack = time.monotonic()
+            elif kind == S.SRESULT and self.accepted is not None:
+                self.result = self.seal.open_result(raw)
+            elif kind == S.SERROR:
+                self.error = self.seal.open_error(raw) or "the Seed Vault refused the upload"
+            elif kind == P.STATUS:
+                _, state, value = P.parse_status(raw)
+                self.status = (state, value)
+            else:
+                return
+        except (S.SealError, ValueError, IndexError, struct_error):
+            return                       # not really from our vault, or damaged
+        self.last_heard = time.monotonic()
+        self.changed.set()
+
+
+async def _upload(req: "Requester", page: bytes, offer: str, report: ProgressCallback,
+                  gap: float, settle: float = 0.8, max_pokes: int = 8) -> tuple[bool, str]:
+    rid = random.randint(1, 0xFFFF)
+    seal = S.ReaderSession(await req._find_vault(report), rid, P.KIND_UPLOAD, offer)
+    ex = _UploadExchange(rid, seal)
+    req._active = ex
+    started = time.monotonic()
+    try:
+        attempts, last_request = 0, 0.0
+        chunks: list[bytes] = []
+        sent_once = False
+        pokes = 0
+        poke_after = max(req.quiet * 2.5, 3 * gap + 2)
+
+        def progress(stage: str, message: str = "") -> None:
+            have = [i for i in range(len(chunks)) if i not in ex.missing] if sent_once else []
+            report(Progress(stage=stage, message=message, elapsed=time.monotonic() - started,
+                            total=len(chunks), have=have, attempt=attempts))
+
+        async def send(indexes: list[int], stage: str) -> None:
+            for n, i in enumerate(indexes):
+                if ex.result or ex.error:
+                    return
+                await req.tx.send(P.build_uchunk(rid, i, chunks[i]))
+                ex.missing.discard(i)
+                if stage == "uploading":
+                    report(Progress(stage=stage, elapsed=time.monotonic() - started,
+                                    total=len(chunks), have=list(range(n + 1)), attempt=attempts))
+                await asyncio.sleep(gap)
+            ex.last_heard = time.monotonic()
+
+        while True:
+            now = time.monotonic()
+            if ex.error:
+                raise MossError(ex.error)
+            if ex.result:
+                return ex.result
+            if ex.accepted is None:
+                waiting = ex.status is not None
+                due = req.request_timeout if not waiting else max(req.request_timeout, poke_after)
+                if attempts == 0 or (now - max(last_request, ex.last_heard) >= due):
+                    # Offers are tiny and a refusal is the answer we need, so
+                    # try a few more times than a read would before giving up.
+                    if attempts >= req.request_attempts + (9 if waiting else 3):
+                        raise MossError("no pulse from the Seed Vault. Is it running, "
+                                        "and are you on the same channel?")
+                    await req.tx.send(seal.request)
+                    attempts += 1
+                    last_request = time.monotonic()
+                progress("queued" if waiting and ex.status[0] == P.ST_QUEUED else "requesting")
+            elif not sent_once:
+                chunks = seal.seal_upload(page)
+                sent_once = True
+                ex.reaccepted = False
+                await send(list(range(len(chunks))), "uploading")
+            elif ex.reaccepted:
+                ex.reaccepted = False                # it heard none of them: everything again
+                await send(list(range(len(chunks))), "repairing")
+            elif ex.missing and now - ex.last_unack >= settle:
+                await send(sorted(ex.missing), "repairing")
+            elif now - ex.last_heard >= poke_after:
+                pokes += 1
+                if pokes > max_pokes:
+                    raise MossError("the Seed Vault stopped answering in the middle of the upload")
+                await req.tx.send(seal.request)      # "where are we?": it answers with what's missing
+                ex.last_heard = time.monotonic()
+            else:
+                progress("checking" if not ex.missing else "repairing")
+            ex.changed.clear()
+            try:
+                await asyncio.wait_for(ex.changed.wait(), 0.25)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        req._active = None
+
+
 # ---------------------------------------------------------------- the client
 
 class MossClient:
     def __init__(self, tx, cache: Cache | None = None, keyring: "S.Keyring | None" = None,
-                 notice: Callable[[str], None] | None = None, **timing):
+                 notice: Callable[[str], None] | None = None, home=None,
+                 upload_gap: float = 1.0, **timing):
         """keyring: encrypt everything to the trusted Seed Vault (the normal
-        case). Without one, requests and pages travel unencrypted."""
+        case). Without one, requests and pages travel unencrypted.
+        home: where seen-pages.json lives (default ~/.moss)."""
         self.cache = cache or Cache()
         self.requester = Requester(tx, keyring=keyring, notice=notice, **timing)
+        self.seen = PG.SeenVersions(home)
+        self.upload_gap = upload_gap
 
     async def search(self, query: str, refresh: bool = False,
                      on_progress: ProgressCallback | None = None) -> SearchOutcome:
@@ -508,3 +659,62 @@ class MossClient:
 
     def cached(self) -> list[CachedArticle]:
         return self.cache.list_articles()
+
+    # ------------------------------------------------------------ community pages
+    def _page_file(self, address: str) -> Path:
+        aid, name = PG.parse_address(address)
+        return Path(self.cache.folder) / "pages" / aid / f"{name}.mosspage"
+
+    async def page(self, address: str, refresh: bool = False,
+                   on_progress: ProgressCallback | None = None) -> PageOutcome:
+        """Fetch a community page by its address, check its author's
+        signature, and refuse an older version than one already seen."""
+        address = address.strip()
+        try:
+            PG.parse_address(address)
+        except PG.PageError as exc:
+            raise MossError(str(exc)) from exc
+        path = self._page_file(address)
+        if not refresh and path.exists():
+            try:
+                page = PG.load(path.read_bytes())
+                if on_progress:
+                    on_progress(Progress(stage="done", message="from cache"))
+                return PageOutcome(page, True, path.stat().st_mtime)
+            except PG.PageError:
+                pass                                   # damaged copy: fetch it again
+        got = await self.requester.fetch(P.KIND_PAGE, address, on_progress)
+        try:
+            page = PG.load(got.content)
+        except PG.PageError as exc:
+            raise MossError(f"page came through blighted: {exc}. Not keeping it.") from exc
+        if page.address != address:
+            raise MossError("the Seed Vault sent a different page than the one asked for")
+        try:
+            self.seen.accept(page)
+        except PG.PageError as exc:
+            raise MossError(str(exc)) from exc
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(got.content)
+        if on_progress:
+            on_progress(Progress(stage="done", elapsed=got.elapsed,
+                                 total=got.chunks, have=list(range(got.chunks))))
+        return PageOutcome(page, False, time.time())
+
+    async def upload(self, data: bytes, on_progress: ProgressCallback | None = None) -> str:
+        """Upload a signed page file. Returns the vault's message ("stored v2");
+        raises MossError with the vault's reason if it wasn't kept."""
+        try:
+            page = PG.load(data)
+        except PG.PageError as exc:
+            raise MossError(f"not uploading a broken page file: {exc}") from exc
+        offer = f"{page.address} {page.version} {len(data)}"
+        try:
+            stored, message = await self.requester.upload(data, offer, on_progress, self.upload_gap)
+        except MossError as exc:
+            if str(exc) == f"already has v{page.version} of this page":
+                return "already on this Seed Vault"
+            raise
+        if not stored:
+            raise MossError(message)
+        return message

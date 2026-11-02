@@ -42,6 +42,8 @@ class Factory:
         self.scopes_supported = scopes
         self.scope_sets: list = []
         self.refuse_sends = 0           # how many sends the radio will refuse next
+        self.ble_calls: list = []       # (address, pin) for each Bluetooth connect
+        self.ble_missing = False        # no Bluetooth radio in range
 
     async def create_serial(self, port, baud):
         if self.port_held:
@@ -51,11 +53,19 @@ class Factory:
         self.port_held = True
         return radio
 
+    async def create_ble(self, address=None, pin=None, **kw):
+        """Bluetooth: same radio, reached differently. Records how it was asked for."""
+        self.ble_calls.append((address, pin))
+        if self.ble_missing:
+            return None                  # nothing answered the scan
+        return await self.create_serial(f"ble:{address}", 0)
+
     def install(self):
         """Put this fake in place of the real meshcore package; returns an undo."""
         fake = types.ModuleType("meshcore")
         fake.EventType = EventType
-        fake.MeshCore = types.SimpleNamespace(create_serial=self.create_serial)
+        fake.MeshCore = types.SimpleNamespace(create_serial=self.create_serial,
+                                              create_ble=self.create_ble)
         saved = sys.modules.get("meshcore")
         sys.modules["meshcore"] = fake
 

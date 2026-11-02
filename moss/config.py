@@ -5,7 +5,10 @@ Written by `moss setup` (and the menu's Settings), read at start-up so
 the command line always wins over the saved value.
 
     role      "reader" or "vault"
-    port      the radio's serial port (COM12, /dev/serial/by-id/...)
+    port      the radio's serial port (COM12, /dev/serial/by-id/...), or null
+    ble       Bluetooth instead of a cable: the radio's address or name, "" for
+              any MeshCore radio nearby, null for USB
+    pin       Bluetooth pairing PIN, if the radio needs one
     channel   the hashtag channel, #moss unless changed
     scope     MeshCore region to keep flooded traffic inside, or null
     branch    which GitHub branch `moss update` follows: main or experimental
@@ -17,7 +20,16 @@ import json
 import os
 from pathlib import Path
 
-DEFAULTS = {"role": None, "port": None, "channel": "#moss", "scope": None, "branch": "main"}
+DEFAULTS = {"role": None, "port": None, "ble": None, "pin": None, "channel": "#moss",
+            "scope": None, "branch": "main"}
+
+
+def radio_label(cfg: dict) -> str:
+    if cfg.get("ble") is not None:
+        return f"Bluetooth ({cfg['ble'] or 'any MeshCore radio'})"
+    return cfg.get("port") or "not set"
+
+
 BRANCHES = ("main", "experimental")
 
 

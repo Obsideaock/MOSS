@@ -118,6 +118,10 @@ class MeshCoreTransport:
     While the link is down, datagrams are dropped as if lost in the air; the
     transfer protocol already repeats what didn't arrive.
 
+    Bluetooth works the same way (ble="" finds any MeshCore radio nearby;
+    ble="<address or name>" a particular one): same commands, same watchdog,
+    just a different link to the radio.
+
     MOSS talks on exactly one channel, #moss by default, found or created on
     the radio at every connect (see channel.py). Data arriving on any other
     channel is ignored. An optional flood *scope* (a MeshCore region name)
@@ -134,8 +138,10 @@ class MeshCoreTransport:
     def __init__(self, port: str, baud: int, channel_name: str = "#moss",
                  data_type: int = MOSS_DATA_TYPE, poll_interval: float = 1.0,
                  auto_port: bool = False, log: Callable[[str], None] | None = None,
-                 scope: str | None = None):
+                 scope: str | None = None, ble: str | None = None, pin: str | None = None):
         self.port, self.baud, self.data_type = port, baud, data_type
+        self.ble, self.pin = ble, pin          # ble None: USB serial
+        self.radio_name = ""
         self.channel_name, self.scope = channel_name, scope
         self.channel: int | None = None     # the slot #moss lives in on this radio
         self.scoped = False
@@ -157,13 +163,23 @@ class MeshCoreTransport:
         self._refused_streak = 0
         self.lost_reason = ""
 
+    @property
+    def where(self) -> str:
+        """How this radio is reached, for messages: COM12, or Bluetooth MeshCore-Stern."""
+        if self.ble is None:
+            return self.port or "?"
+        return f"Bluetooth ({self.radio_name or self.ble or 'any MeshCore radio'})"
+
     @classmethod
     async def open(cls, port: str | None, baud: int, channel_name: str = "#moss",
                    data_type: int = MOSS_DATA_TYPE,
                    log: Callable[[str], None] | None = None,
-                   scope: str | None = None) -> "MeshCoreTransport":
+                   scope: str | None = None, ble: str | None = None,
+                   pin: str | None = None) -> "MeshCoreTransport":
         from .channel import check_name
         check_name(channel_name)
+        if ble is not None:
+            return await cls._open_ble(baud, channel_name, data_type, log, scope, ble, pin)
         auto = port is None
         port = port or pick_port()
         if port.startswith("/") and not Path(port).exists():
@@ -187,14 +203,48 @@ class MeshCoreTransport:
         tx._task = asyncio.create_task(tx._supervise())
         return tx
 
+    @classmethod
+    async def _open_ble(cls, baud, channel_name, data_type, log, scope, ble, pin):
+        tx = cls(None, baud, channel_name, data_type, log=log, scope=scope, ble=ble, pin=pin)
+        last = None
+        for attempt in range(1, 4):           # Bluetooth is flakier to set up than a cable
+            try:
+                await tx._attach()
+                break
+            except ImportError as exc:
+                raise SystemExit("Bluetooth needs the 'bleak' package: pip install bleak "
+                                 "(or run the installer again)") from exc
+            except SystemExit:
+                raise
+            except Exception as exc:
+                last = exc
+                await asyncio.sleep(2.0)
+        else:
+            who = f" {ble}" if ble else ""
+            raise SystemExit(
+                f"couldn't reach the radio{who} over Bluetooth: {last or 'not found'}\n"
+                f"  Is it switched on and nearby? Is the MeshCore phone app disconnected from it "
+                f"(a radio takes one Bluetooth connection at a time)?\n"
+                f"  If your computer asks for a PIN, it's shown in the MeshCore app's settings "
+                f"(often 123456); pairing it once in the computer's Bluetooth settings also works.")
+        tx._task = asyncio.create_task(tx._supervise())
+        return tx
+
     # ------------------------------------------------------------ connection
     async def _attach(self) -> None:
-        """Open the port and start listening."""
+        """Open the port (or Bluetooth link) and start listening."""
         from meshcore import EventType, MeshCore
         from .channel import ChannelError, find_or_create
-        mc = await MeshCore.create_serial(self.port, self.baud)
-        if mc is None or not getattr(mc, "is_connected", True):
-            raise ConnectionError("no answer from the radio")
+        if self.ble is not None:
+            mc = await MeshCore.create_ble(address=self.ble or None, pin=self.pin)
+            if mc is None or not getattr(mc, "is_connected", True):
+                raise ConnectionError("no MeshCore radio answered over Bluetooth")
+            info = getattr(mc, "self_info", None)
+            self.radio_name = (info or {}).get("name", "") if isinstance(info, dict) else ""
+        else:
+            mc = await MeshCore.create_serial(self.port, self.baud)
+            if mc is None or not getattr(mc, "is_connected", True):
+                raise ConnectionError("no answer from the radio")
         self._EventType = EventType
         try:
             self.channel, _ = await find_or_create(mc, self.channel_name, EventType, self.log)
@@ -270,14 +320,14 @@ class MeshCoreTransport:
             while self.state != "closed":
                 tries += 1
                 try:
-                    if self.auto_port:
+                    if self.auto_port and self.ble is None:
                         try:
                             self.port = pick_port()
                         except SystemExit:
                             raise ConnectionError("radio not plugged in")
                     await self._attach()
                     self.reconnects += 1
-                    self.log(f"radio back on {self.port}")
+                    self.log(f"radio back on {self.where}")
                     break
                 except asyncio.CancelledError:
                     raise
@@ -288,7 +338,7 @@ class MeshCoreTransport:
                     delay = min(delay * 1.5, 10.0)
                 except Exception as exc:
                     if tries == 1 or tries % 5 == 0:
-                        self.log(f"still can't reopen {self.port} (try {tries}): "
+                        self.log(f"still can't reopen {self.where} (try {tries}): "
                                  f"{type(exc).__name__}: {exc}")
                     await self._detach()
                     await asyncio.sleep(delay)
@@ -458,3 +508,20 @@ def pick_port() -> str:
         return ports[0].device
     listing = "\n".join(f"  {p.device:20} {p.description}" for p in ports)
     raise SystemExit(f"several serial ports found, pick one with --port:\n{listing}")
+
+
+BLE_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # MeshCore's companion service
+
+
+async def scan_ble(seconds: float = 6.0) -> list[tuple[str, str, int | None]]:
+    """MeshCore radios advertising over Bluetooth nearby: (address, name, signal dBm),
+    strongest first. The address is a MAC on Windows/Linux and an ID on macOS."""
+    from bleak import BleakScanner
+    found = await BleakScanner.discover(timeout=seconds, return_adv=True)
+    out = []
+    for dev, adv in found.values():
+        name = adv.local_name or dev.name or ""
+        uuids = [u.lower() for u in (adv.service_uuids or [])]
+        if name.startswith("MeshCore") or BLE_UART_SERVICE in uuids:
+            out.append((dev.address, name or "MeshCore radio", adv.rssi))
+    return sorted(out, key=lambda r: -(r[2] if r[2] is not None else -999))

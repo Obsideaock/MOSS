@@ -124,7 +124,9 @@ case ":$PATH:" in
   *":$BIN:"*) ok "the moss command is ready" ;;
   *)
     for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-      [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.profile" ]] || continue
+      # macOS's shell is zsh, which never reads .profile: make .zshrc if needed.
+      [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.profile" ]] || \
+        { [[ "$(uname)" == "Darwin" && "$rc" == "$HOME/.zshrc" ]]; } || continue
       grep -qs 'MOSS: add ~/.local/bin' "$rc" || \
         printf '\n# MOSS: add ~/.local/bin to PATH\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
     done
@@ -153,7 +155,14 @@ echo
 if [[ -t 0 ]]; then
   "$DIR/.venv/bin/moss" "${setup_args[@]}"
 elif (exec </dev/tty) 2>/dev/null; then
-  "$DIR/.venv/bin/moss" "${setup_args[@]}" </dev/tty
+  # Answer from the keyboard. On macOS, use the terminal's own device name
+  # rather than the /dev/tty alias, which some event loops can't watch.
+  term="/dev/tty"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    t="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')"
+    [[ -n "$t" && "$t" != "??" && -e "/dev/$t" ]] && term="/dev/$t"
+  fi
+  "$DIR/.venv/bin/moss" "${setup_args[@]}" <"$term"
 else
   "$DIR/.venv/bin/moss" "${setup_args[@]}" --yes
 fi

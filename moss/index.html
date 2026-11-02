@@ -318,7 +318,7 @@ a { color: var(--text-accent); }
   <aside class="left" id="left" aria-label="Saved notes">
     <form class="search-box" id="find" role="search">
       <button type="submit" id="go" aria-label="Search over radio"><span data-icon="search" data-size="s"></span></button>
-      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search over radio…" aria-label="Search over radio">
+      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search over radio, or paste a moss: address…" aria-label="Search over radio">
     </form>
     <div class="tree" id="tree"></div>
   </aside>
@@ -906,6 +906,7 @@ function track(job, kind, label, onDone, retry) {
 async function runSearch(q, refresh = false) {
   q = q.trim();
   if (!q) { qInput.focus(); return; }
+  if (q.startsWith("moss:")) return openPage(q, refresh);   // a community page address
   qInput.value = q;
   const retry = () => runSearch(q, refresh);
   const job = await api("/api/search", "POST", { q, refresh });
@@ -918,6 +919,43 @@ async function openArticle(title, refresh = false) {
   const job = await api("/api/article", "POST", { title, refresh });
   if (job.error) return failView(job.error, null);
   track(job, "article", title, articleView, retry);
+}
+
+async function openPage(address, refresh = false) {
+  const retry = () => openPage(address, refresh);
+  const job = await api("/api/page", "POST", { address, refresh });
+  if (job.error) return failView(job.error, null);
+  track(job, "page", address, pageView, retry);
+}
+
+/* A community page: written and signed by its author, carried by the vault. */
+function pageView(r) {
+  const p = r.page;
+  app.view = "article"; app.current = { title: r.title, text: r.text };
+  closeLinkMenu();
+  chrome({ tab: r.title, crumb: ["Community", r.title], back: !!app.lastResults,
+    actions: [{ icon: "refresh", label: "Fetch again over radio", run: () => openPage(p.address, true) }] });
+  const how = r.from_cache ? "saved copy"
+    : `over radio in ${secs(r.elapsed)}, ${r.packets} spore${r.packets === 1 ? "" : "s"}`;
+  const row = (icon, key, val) => h("div", { class: "prop" },
+    h("div", { class: "key" }, svg(icon, "s"), key), h("div", { class: "val" }, val));
+  const props = h("details", { class: "properties", open: "" },
+    h("summary", {}, svg("chevron", "s"), "Properties"),
+    row("tag", "author", `${p.author} · ${p.fingerprint}`),
+    row("lock", "signature", "checked: written by this author, unchanged"),
+    row("calendar", "version", `v${p.version}, signed ${day(p.signed)}`),
+    row("link", "address", h("code", {}, p.address)),
+    row("scale", "visibility", p.visibility === "unlisted" ? "unlisted (only people with the link)" : "public"),
+    row("calendar", "fetched", `${day(r.fetched_at)}, ${how}`));
+  if (p.deleted) {
+    show(h("div", {}, h("h1", { class: "inline-title" }, "Deleted page"), props,
+      callout("note", "Deleted by its author", "alert", h("p", {}, "The author published a signed deletion, so this vault no longer carries the page."))));
+    renderOutline(null); setStat("");
+    return;
+  }
+  const body = renderText(r.text, { withTitle: false });
+  show(h("div", {}, h("h1", { class: "inline-title" }, r.title), props, body.node));
+  renderOutline(body.node, [...body.linked]); setStat(r.text);
 }
 
 async function loadCached() { app.cached = await api("/api/cached"); renderTree(); }

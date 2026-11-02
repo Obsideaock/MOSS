@@ -114,6 +114,13 @@ class RoundTripTests(Base):
         self.assertTrue(gone.deleted)
         self.assertEqual((gone.version, gone.body, gone.text()), (2, b"", ""))
 
+    def test_unlisted_page_can_be_deleted(self):
+        name = PG.random_name()
+        self.stern.sign(name, MD, visibility=PG.UNLISTED)
+        gone = self.stern.sign(name, None)                 # no visibility given
+        self.assertTrue(gone.deleted)
+        self.assertEqual(gone.record["visibility"], PG.UNLISTED)
+
     def test_visibility_is_kept_for_a_name(self):
         name = PG.random_name()
         self.stern.sign(name, MD, visibility=PG.UNLISTED)

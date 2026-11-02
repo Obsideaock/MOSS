@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from . import service
@@ -40,11 +41,30 @@ def describe(info: dict) -> str:
     return " · ".join(parts) or "the radio didn't describe itself"
 
 
+@dataclass
+class Link:
+    """How to reach the radio: a serial port, or Bluetooth (ble not None)."""
+    port: str | None = None
+    ble: str | None = None
+    pin: str | None = None
+
+    @classmethod
+    def of(cls, link) -> "Link":
+        """A Link, a port name, or None (= whatever setup saved)."""
+        if isinstance(link, Link):
+            return link
+        cfg = load()
+        if link:
+            return cls(port=link)
+        return cls(cfg.get("port"), cfg.get("ble"), cfg.get("pin"))
+
+
 @contextlib.asynccontextmanager
-async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
+async def radio(link, out: Out, pause_vault: bool | None = None):
     """Open the radio on #moss, pausing the Seed Vault service if it holds the port."""
     from .transport import MeshCoreTransport
     cfg = load()
+    link = Link.of(link)
     if pause_vault is None:
         pause_vault = cfg.get("role") == "vault" and service.available() and service.is_active()
     if pause_vault:
@@ -53,9 +73,10 @@ async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
         await asyncio.sleep(1.5)
     tx = None
     try:
-        tx = await MeshCoreTransport.open(port or cfg.get("port"), 115200,
+        tx = await MeshCoreTransport.open(link.port, 115200,
                                           cfg.get("channel") or "#moss", log=out,
-                                          scope=cfg.get("scope"))
+                                          scope=cfg.get("scope"), ble=link.ble, pin=link.pin)
+        out(f"connected over {tx.where}")
         out(f"radio: {describe(tx.radio_info())}")
         out(f"{tx.channel_name} is in slot {tx.channel}")
         yield tx
@@ -67,7 +88,7 @@ async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
             service.control("start")
 
 
-async def send(port: str | None, count: int = 10, gap: float = 3.0, out: Out = print) -> int:
+async def send(port, count: int = 10, gap: float = 3.0, out: Out = print) -> int:
     async with radio(port, out) as tx:
         name = tx.radio_info().get("name") or "a MOSS radio"
         sent = 0
@@ -81,7 +102,7 @@ async def send(port: str | None, count: int = 10, gap: float = 3.0, out: Out = p
         return sent
 
 
-async def listen(port: str | None, seconds: float = 300, out: Out = print,
+async def listen(port, seconds: float = 300, out: Out = print,
                  until: int | None = None) -> list[str]:
     heard: list[str] = []
     done = asyncio.Event()
@@ -112,6 +133,6 @@ async def listen(port: str | None, seconds: float = 300, out: Out = print,
         return heard
 
 
-async def info(port: str | None, out: Out = print, pause_vault: bool | None = None) -> dict:
+async def info(port, out: Out = print, pause_vault: bool | None = None) -> dict:
     async with radio(port, out, pause_vault) as tx:
         return {**tx.radio_info(), "slot": tx.channel}

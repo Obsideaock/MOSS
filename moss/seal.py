@@ -34,6 +34,18 @@ Wire formats (all fit one 163-byte datagram):
     SCAPSULE  11 | rid 2 | vault one-time pub 32  | sealed(total, wire len, body len, flags, hash) | tag 16
     SERROR    12 | rid 2 | sealed(message) | tag 16
     spores    ordinary CHUNKs carrying the encrypted body; its 16-byte tag rides at the end
+
+Uploads (a community page going from a reader to the vault) start with an
+ordinary SREQUEST of kind "upload" whose query is the offer: address,
+version and size. Then:
+
+    SACCEPT   13 | rid 2 | vault one-time pub 32 | sealed(spores 2, wire length 4) | tag 16
+    UCHUNK    14 | rid 2 | index 2 | encrypted page bytes      (reader -> vault)
+    UNACK     15 | rid 2 | count 1 | missing indexes           (vault -> reader)
+    SRESULT   16 | rid 2 | sealed(stored? 1, message) | tag 16
+
+The upload key mixes the reader's and the vault's one-time keys with the
+vault's long-term key, exactly like a reply, under its own label.
 """
 
 from __future__ import annotations
@@ -56,13 +68,22 @@ from Crypto.Signature import eddsa
 from . import protocol as P
 
 HELLO, WHOIS, SREQUEST, SCAPSULE, SERROR = 8, 9, 10, 11, 12
+SACCEPT, SRESULT = 13, 16
 SUITE = b"MOSS-seal-v1 X25519 HKDF-SHA256 ChaCha20-Poly1305"
 TAG = 16
 REQ_HEAD = 1 + 2 + 32                       # type, rid, one-time public key
 REQ_ROOM = P.MAX_DATAGRAM - REQ_HEAD - TAG  # 112 bytes of sealed request
 MAX_SEALED_QUERY = REQ_ROOM - 2             # 110 bytes of search text or title
 CAPSULE_BODY = struct.Struct("<HIIB8s")     # total, wire length, body length, flags, hash
-NONCE_REQUEST, NONCE_ERROR, NONCE_CAPSULE, NONCE_BODY = (bytes(11) + bytes([n]) for n in range(4))
+UPLOAD_INFO = struct.Struct("<HI")          # spores, wire length
+NONCE_REQUEST, NONCE_ERROR, NONCE_CAPSULE, NONCE_BODY, NONCE_RESULT = (
+    bytes(11) + bytes([n]) for n in range(5))
+UPLOAD_AAD = b"MOSS upload"
+
+
+def upload_spores(page_size: int) -> int:
+    """Spores an upload of a page file this big takes (the 16-byte tag included)."""
+    return max(1, -(-(page_size + TAG) // P.CHUNK_BYTES))
 
 
 class SealError(Exception):
@@ -243,6 +264,28 @@ class VaultSession:
         return head + _seal(k, NONCE_CAPSULE, head, info), chunks
 
 
+    # -- uploads
+    def accept_upload(self, wire_len: int) -> tuple[bytes, bytes]:
+        """(SACCEPT datagram, upload key). The key lives only as long as the upload."""
+        eph = ECC.generate(curve="curve25519")
+        eph_pub = _raw(eph)
+        k = _hkdf(self.static + _dh(eph, self.reader_eph),
+                  self.reader_eph + eph_pub + self.keys.x_pub, b"upload")
+        del eph
+        head = struct.pack("<BH", SACCEPT, self.rid) + eph_pub
+        spores = -(-wire_len // P.CHUNK_BYTES)
+        return head + _seal(k, NONCE_CAPSULE, head, UPLOAD_INFO.pack(spores, wire_len)), k
+
+    def open_upload(self, k: bytes, wire: bytes) -> bytes:
+        return _open(k, NONCE_BODY, UPLOAD_AAD, wire)
+
+    def upload_result(self, k: bytes, stored: bool, message: str) -> bytes:
+        head = struct.pack("<BH", SRESULT, self.rid)
+        room = P.MAX_DATAGRAM - len(head) - TAG - 1
+        body = bytes([1 if stored else 0]) + message.encode()[:room].decode(errors="ignore").encode()
+        return head + _seal(k, NONCE_RESULT, head, body)
+
+
 # ---------------------------------------------------------------- the reader's side
 
 class ReaderSession:
@@ -263,6 +306,7 @@ class ReaderSession:
         self.request = head + _seal(self.k_req, NONCE_REQUEST, head, plain)
         assert len(self.request) == P.MAX_DATAGRAM
         self.k_reply: bytes | None = None
+        self.k_upload: bytes | None = None
         self._stream = None
         self._stream_at = 0
 
@@ -289,6 +333,30 @@ class ReaderSession:
             self._stream.seek(64 + offset)          # ChaCha20-Poly1305 starts at block 1
         self._stream_at = offset + len(data)
         return self._stream.decrypt(data)
+
+    # -- uploads
+    def open_accept(self, raw: bytes) -> dict:
+        """The vault said go: derive the upload key. Raises SealError if it
+        isn't really from our vault."""
+        if len(raw) < 35 + UPLOAD_INFO.size + TAG or raw[0] != SACCEPT:
+            raise SealError("not an upload acceptance")
+        head, vault_eph = raw[:35], raw[3:35]
+        if self._eph is None:
+            raise SealError("already accepted")
+        k = _hkdf(self.static + _dh(self._eph, vault_eph),
+                  self.eph_pub + vault_eph + self.vault_x_pub, b"upload")
+        spores, wire_len = UPLOAD_INFO.unpack(_open(k, NONCE_CAPSULE, head, raw[35:]))
+        self.k_upload = k
+        self._eph = None
+        return {"total": spores, "length": wire_len}
+
+    def seal_upload(self, page: bytes) -> list[bytes]:
+        wire = _seal(self.k_upload, NONCE_BODY, UPLOAD_AAD, page)
+        return [wire[i:i + P.CHUNK_BYTES] for i in range(0, len(wire), P.CHUNK_BYTES)]
+
+    def open_result(self, raw: bytes) -> tuple[bool, str]:
+        body = _open(self.k_upload, NONCE_RESULT, raw[:3], raw[3:])
+        return body[:1] == b"\x01", body[1:].decode(errors="replace")
 
     def open_body(self, wire: bytes, body_len: int) -> tuple[str, bytes]:
         body = _open(self.k_reply, NONCE_BODY, b"", wire)[:body_len]

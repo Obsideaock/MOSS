@@ -1,0 +1,54 @@
+[37m╭─[0m[37m [0m[1;37mMOSS · reader[0m[37m [0m[37m─────────────────────────────────────────────────────────────────────────────────────────────────────[0m[37m─╮[0m
+[37m│[0m  radio   not set (Settings → Radio port)                                                                             [37m│[0m
+[37m│[0m  vault   not met yet                                                                                                 [37m│[0m
+[37m│[0m  version main @ b74eed6 2026-10-07                                                                                   [37m│[0m
+[37m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+[?12l[?25h[6n[?2004h[?1l[?25l[0m[?7l[0m[J[0;90;1m›[0;1m What would you like to do? [0;90m [0m
+[0;90;1m » Open the reader in your browser[0m
+[0m   Search from here[0m
+[0m   Open a page by address[0m
+[0m   Read saved articles[0m
+[0m   My pages[0m
+[0m   Identities[0m
+[0m   Radio check[0m
+[0m   Settings[0m
+[0m   Update MOSS[0m
+[0m   ← Back[9D[10A[30C[?7h[0m[?7l[0m
+[0m   Open the reader in your browser[0m
+[0;90;1m » Search from here[2A[11C[?7h[0m[?7l[0m
+
+[0m   Search from here[0m
+[0;90;1m » Open a page by address[3A[5C[?7h[0m[?7l[0m
+
+
+[0m   Open a page by address[0m
+[0;90;1m » Read saved articles[4A[8C[?7h[0m[?7l[30D[0m[J[0;90;1m›[0;1m What would you like to do? [0;90;1mRead saved articles[48D[0m
+[J[?7h[0m[?2004l[?12l[?25h[33m![0m nothing saved yet
+[?2004h[?1l[?25l[0m[?7l[0m[J[0;1m press any key to go back[25D[26C[?7h[0m[?12l[?25h[?25l[?7l[26D[0m[J[0;1m press any key to go back[25D[0m
+[J[?7h[0m[?12l[?25h[?2004l[37m╭─[0m[37m [0m[1;37mMOSS · reader[0m[37m [0m[37m─────────────────────────────────────────────────────────────────────────────────────────────────────[0m[37m─╮[0m
+[37m│[0m  radio   not set (Settings → Radio port)                                                                             [37m│[0m
+[37m│[0m  vault   not met yet                                                                                                 [37m│[0m
+[37m│[0m  version main @ b74eed6 2026-10-07                                                                                   [37m│[0m
+[37m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+[6n[?2004h[?1l[?25l[0m[?7l[0m[J[0;90;1m›[0;1m What would you like to do? [0;90m [0m
+[0;90;1m » Open the reader in your browser[0m
+[0m   Search from here[0m
+[0m   Open a page by address[0m
+[0m   Read saved articles[0m
+[0m   My pages[0m
+[0m   Identities[0m
+[0m   Radio check[0m
+[0m   Settings[0m
+[0m   Update MOSS[0m
+[0m   ← Back[9D[10A[30C[?7h[0m[30D[J[0m[?7h[?2004l[?12l[?25hWARNING: your terminal doesn't support cursor position requests (CPR).
+[?2004h[?25l[0m[?7l[0m[J[0;90;1m›[0;1m What would you like to do? [0;90m [0m
+[0;90;1m » Open the reader in your browser[0m
+[0m   Search from here[0m
+[0m   Open a page by address[0m
+[0m   Read saved articles[0m
+[0m   My pages[0m
+[0m   Identities[0m
+[0m   Radio check[0m
+[0m   Settings[0m
+[0m   Update MOSS[0m
+[0m   ← Back[9D[10A[30C[?7h[0m

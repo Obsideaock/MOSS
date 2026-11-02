@@ -17,14 +17,35 @@ except ImportError as exc:                      # pragma: no cover - install pro
                      f"  pip install -r requirements.txt\n"
                      f"or reinstall with the one-line installer.") from exc
 
+def _mac_tty_fix() -> None:
+    """macOS: kqueue (the default event loop's selector) can't watch /dev/tty,
+    which is what stdin is when the installer runs `moss setup </dev/tty`
+    under `curl ... | bash`. The prompts then die with EOFError. The plain
+    select() selector can, so use that on macOS. It's only ever watching a
+    keyboard and a radio, where the difference doesn't matter."""
+    if sys.platform != "darwin":
+        return
+    import asyncio
+    import selectors
+
+    class _SelectPolicy(asyncio.DefaultEventLoopPolicy):
+        def new_event_loop(self):
+            return asyncio.SelectorEventLoop(selectors.SelectSelector())
+
+    asyncio.set_event_loop_policy(_SelectPolicy())
+
+
+_mac_tty_fix()
 console = Console(highlight=False)
 MOSS_GREEN = "#7bc47f"
 STYLE = questionary.Style([
     ("qmark", f"fg:{MOSS_GREEN} bold"),
     ("question", "bold"),
     ("pointer", f"fg:{MOSS_GREEN} bold"),
-    ("highlighted", f"fg:{MOSS_GREEN} bold"),
-    ("selected", f"fg:{MOSS_GREEN}"),
+    ("highlighted", f"fg:{MOSS_GREEN} bold noreverse"),
+    # questionary marks the default choice "selected", which prompt_toolkit
+    # draws in reverse video: a solid bar that looks like it's already picked.
+    ("selected", f"fg:{MOSS_GREEN} bold noreverse"),
     ("answer", f"fg:{MOSS_GREEN} bold"),
     ("instruction", "fg:#888888"),
 ])
