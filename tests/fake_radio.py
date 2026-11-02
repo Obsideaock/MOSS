@@ -24,6 +24,19 @@ class EventType:
     CHANNEL_INFO = "channel_info"
     DEVICE_INFO = "device_info"
     CHANNEL_MSG_RECV = "channel_message"
+    RX_LOG_DATA = "rx_log_data"
+
+
+def group_packet(secret: bytes, datagram: bytes) -> bytes:
+    """A MeshCore group-data packet body as it appears in the radio's log:
+    channel hash, 2-byte MAC, AES-128-ECB ciphertext of (a small header + data)."""
+    import hmac
+    from Crypto.Cipher import AES
+    plain = b"\x01\x02\x03\x04" + b"\x01\xff" + bytes([len(datagram)]) + datagram
+    plain += bytes(-len(plain) % 16)
+    ct = AES.new(secret, AES.MODE_ECB).encrypt(plain)
+    mac = hmac.new(secret.ljust(32, b"\0"), ct, hashlib.sha256).digest()[:2]
+    return bytes([hashlib.sha256(secret).digest()[0]]) + mac + ct
 
 
 class Event:
@@ -42,6 +55,9 @@ class Factory:
         self.scopes_supported = scopes
         self.scope_sets: list = []
         self.refuse_sends = 0           # how many sends the radio will refuse next
+        self.ble_calls: list = []       # (address, pin) for each Bluetooth connect
+        self.ble_missing = False        # no Bluetooth radio in range
+        self.refuse_routes = False      # firmware that won't send along a given path
 
     async def create_serial(self, port, baud):
         if self.port_held:
@@ -51,11 +67,19 @@ class Factory:
         self.port_held = True
         return radio
 
+    async def create_ble(self, address=None, pin=None, **kw):
+        """Bluetooth: same radio, reached differently. Records how it was asked for."""
+        self.ble_calls.append((address, pin))
+        if self.ble_missing:
+            return None                  # nothing answered the scan
+        return await self.create_serial(f"ble:{address}", 0)
+
     def install(self):
         """Put this fake in place of the real meshcore package; returns an undo."""
         fake = types.ModuleType("meshcore")
         fake.EventType = EventType
-        fake.MeshCore = types.SimpleNamespace(create_serial=self.create_serial)
+        fake.MeshCore = types.SimpleNamespace(create_serial=self.create_serial,
+                                              create_ble=self.create_ble)
         saved = sys.modules.get("meshcore")
         sys.modules["meshcore"] = fake
 
@@ -75,6 +99,7 @@ class FakeRadio:
         self.self_info = {"name": "Fake Heltec", "radio_freq": 910.525, "radio_bw": 62.5,
                           "radio_sf": 7, "radio_cr": 5, "tx_power": 22}
         self.chat_sent: list[tuple[int, str]] = []
+        self.paths: list = []           # route given for each send (None = flooded)
         self.sent: list[tuple[int, bytes]] = []
         self.silent = False             # asleep: polls go unanswered
         self.unreadable = 0             # polls answered with messages the library can't parse
@@ -83,7 +108,7 @@ class FakeRadio:
             get_msg=self.get_msg, send_channel_data=self.send_channel_data,
             send_device_query=self.send_device_query, get_channel=self.get_channel,
             set_channel=self.set_channel, set_flood_scope=self.set_flood_scope,
-            send_chan_msg=self.send_chan_msg)
+            send_chan_msg=self.send_chan_msg, set_radio=self.set_radio)
 
     @property
     def is_connected(self):
@@ -115,14 +140,30 @@ class FakeRadio:
             return Event(EventType.CHANNEL_DATA_RECV, {})
         return Event(EventType.NO_MORE_MSGS, {})
 
-    async def send_channel_data(self, channel, data_type, data):
+    async def send_channel_data(self, channel, data_type, data, path=None):
         if self.silent or self.closed:
             raise OSError("write failed")
         if self.factory.refuse_sends:
             self.factory.refuse_sends -= 1
             return Event(EventType.ERROR, {"error_code": 3})     # e.g. its queue is full
+        if path is not None and self.factory.refuse_routes:
+            return Event(EventType.ERROR, {"error_code": 4})
         self.sent.append((channel, data))
+        self.paths.append(path)
         return Event(EventType.OK, {})
+
+    async def set_radio(self, freq, bw, sf, cr, repeat=None):
+        self.self_info.update(radio_freq=freq, radio_bw=bw, radio_sf=sf, radio_cr=cr)
+        return Event(EventType.OK, {})
+
+    async def heard_flood(self, slot, raw, path: bytes, hash_size=1, route_type=1):
+        """The radio hears a flooded #moss packet that came through these
+        repeaters: its packet log first, then the datagram itself."""
+        name, secret = self.factory.slots[slot]
+        await self.fire(EventType.RX_LOG_DATA, {
+            "payload_type": 6, "route_type": route_type, "path_hash_size": hash_size,
+            "path": path.hex(), "pkt_payload": group_packet(secret, raw)})
+        self.inbox.append((slot, raw))
 
     async def send_chan_msg(self, channel, text):
         if self.silent or self.closed:

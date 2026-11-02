@@ -44,7 +44,11 @@ class CachedArticle:
 
 class Cache:
     def __init__(self, folder: str | Path | None = None):
-        self.folder = Path(folder) if folder else DEFAULT_DIR
+        if folder:
+            self.folder = Path(folder)
+        else:
+            from .config import moss_home         # honours MOSS_HOME, like everything else
+            self.folder = moss_home() / "cache"
         self.articles = self.folder / "articles"
         self._index_path = self.folder / "index.json"
         self._search_path = self.folder / "searches.json"
@@ -113,9 +117,15 @@ class Cache:
         return ([SearchResult(r["title"], r.get("blurb", "")) for r in entry["results"]],
                 entry["at"])
 
-    def put_search(self, query: str, results: list[SearchResult]) -> None:
+    def get_community(self, query: str) -> list[dict]:
+        entry = self._read(self._search_path).get(self._key(query)) or {}
+        return list(entry.get("community", []))
+
+    def put_search(self, query: str, results: list[SearchResult],
+                   community: list[dict] | None = None) -> None:
         data = self._read(self._search_path)
         data[self._key(query)] = {
             "query": query, "at": time.time(),
-            "results": [{"title": r.title, "blurb": r.blurb} for r in results]}
+            "results": [{"title": r.title, "blurb": r.blurb} for r in results],
+            "community": community or []}
         _atomic_write(self._search_path, json.dumps(data, indent=1))

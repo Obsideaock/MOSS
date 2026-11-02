@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moss-mesh"
-version = "0.5.0"
+version = "0.6.0"
 description = "MOSS: Wikipedia and community pages over MeshCore LoRa radios"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]

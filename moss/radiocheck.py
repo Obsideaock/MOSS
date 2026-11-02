@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from . import service
@@ -40,11 +41,30 @@ def describe(info: dict) -> str:
     return " · ".join(parts) or "the radio didn't describe itself"
 
 
+@dataclass
+class Link:
+    """How to reach the radio: a serial port, or Bluetooth (ble not None)."""
+    port: str | None = None
+    ble: str | None = None
+    pin: str | None = None
+
+    @classmethod
+    def of(cls, link) -> "Link":
+        """A Link, a port name, or None (= whatever setup saved)."""
+        if isinstance(link, Link):
+            return link
+        cfg = load()
+        if link:
+            return cls(port=link)
+        return cls(cfg.get("port"), cfg.get("ble"), cfg.get("pin"))
+
+
 @contextlib.asynccontextmanager
-async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
+async def radio(link, out: Out, pause_vault: bool | None = None):
     """Open the radio on #moss, pausing the Seed Vault service if it holds the port."""
     from .transport import MeshCoreTransport
     cfg = load()
+    link = Link.of(link)
     if pause_vault is None:
         pause_vault = cfg.get("role") == "vault" and service.available() and service.is_active()
     if pause_vault:
@@ -53,9 +73,10 @@ async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
         await asyncio.sleep(1.5)
     tx = None
     try:
-        tx = await MeshCoreTransport.open(port or cfg.get("port"), 115200,
+        tx = await MeshCoreTransport.open(link.port, 115200,
                                           cfg.get("channel") or "#moss", log=out,
-                                          scope=cfg.get("scope"))
+                                          scope=cfg.get("scope"), ble=link.ble, pin=link.pin)
+        out(f"connected over {tx.where}")
         out(f"radio: {describe(tx.radio_info())}")
         out(f"{tx.channel_name} is in slot {tx.channel}")
         yield tx
@@ -67,7 +88,7 @@ async def radio(port: str | None, out: Out, pause_vault: bool | None = None):
             service.control("start")
 
 
-async def send(port: str | None, count: int = 10, gap: float = 3.0, out: Out = print) -> int:
+async def send(port, count: int = 10, gap: float = 3.0, out: Out = print) -> int:
     async with radio(port, out) as tx:
         name = tx.radio_info().get("name") or "a MOSS radio"
         sent = 0
@@ -81,7 +102,7 @@ async def send(port: str | None, count: int = 10, gap: float = 3.0, out: Out = p
         return sent
 
 
-async def listen(port: str | None, seconds: float = 300, out: Out = print,
+async def listen(port, seconds: float = 300, out: Out = print,
                  until: int | None = None) -> list[str]:
     heard: list[str] = []
     done = asyncio.Event()
@@ -112,6 +133,48 @@ async def listen(port: str | None, seconds: float = 300, out: Out = print,
         return heard
 
 
-async def info(port: str | None, out: Out = print, pause_vault: bool | None = None) -> dict:
+async def info(port, out: Out = print, pause_vault: bool | None = None) -> dict:
     async with radio(port, out, pause_vault) as tx:
         return {**tx.radio_info(), "slot": tx.channel}
+
+
+# ---------------------------------------------------------------- a dedicated link
+
+PUBLIC_US = (910.525, 62.5, 7, 5)        # MeshCore's recommended USA/Canada settings
+BANDWIDTHS = (7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0)
+
+
+def check_link(freq: float, bw: float, sf: int, cr: int) -> list[str]:
+    """Problems with these settings (empty if fine). Warnings start with 'note:'."""
+    problems = []
+    if bw not in BANDWIDTHS:
+        problems.append(f"bandwidth must be one of {', '.join(f'{b:g}' for b in BANDWIDTHS)} kHz")
+    if not 5 <= sf <= 12:
+        problems.append("spreading factor must be 5-12")
+    if not 5 <= cr <= 8:
+        problems.append("coding rate must be 5-8")
+    if not 150 <= freq <= 960:
+        problems.append("frequency must be in MHz, like 915.0")
+    elif not 902 <= freq <= 928:
+        problems.append("note: that's outside the US 902-928 MHz band; make sure it's legal where you are")
+    return problems
+
+
+async def set_link(link, freq: float, bw: float, sf: int, cr: int, out: Out = print) -> bool:
+    """Put this radio on these settings. Every MOSS radio that should hear it
+    needs the same four numbers, and on anything but the public settings it
+    no longer hears the public mesh."""
+    errors = [p for p in check_link(freq, bw, sf, cr) if not p.startswith("note:")]
+    if errors:
+        for e in errors:
+            out(e)
+        return False
+    async with radio(link, out) as tx:
+        ev = await tx.mc.commands.set_radio(freq, bw, sf, cr)
+        ok = getattr(ev, "type", None) != tx._EventType.ERROR
+        out(f"radio set to {freq:g} MHz, BW {bw:g} kHz, SF{sf}, CR{cr}" if ok
+            else "the radio refused those settings")
+        if ok:
+            out("some radios only switch after a restart: unplug it (or press reset) if the "
+                "radio check still shows the old settings")
+        return ok

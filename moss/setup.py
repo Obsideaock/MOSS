@@ -88,6 +88,7 @@ def _pick_port(ui, current: str | None, role: str) -> str | None:
         choices.append(ui.Choice("Look again (plug the radio in first)", "__again"))
         choices.append(ui.Choice("Type a port name", "__type"))
         if role == "reader":
+            choices.append(ui.Choice("Bluetooth instead (a T1000-E or other Bluetooth radio)", "__ble"))
             choices.append(ui.Choice("No radio yet (practice mode only)", "__none"))
         if not ports:
             ui.warn("no radio found. Plug it in with a data cable (not charge-only).")
@@ -103,15 +104,64 @@ def _pick_port(ui, current: str | None, role: str) -> str | None:
         return answer
 
 
-def _check_radio(ui, port: str) -> bool:
+def _pick_ble(ui, current: str | None) -> str | None:
+    """A Bluetooth radio's address ("" = any MeshCore radio), or None to go back to USB."""
+    from .transport import scan_ble
+    while True:
+        found = []
+        try:
+            with ui.spin("looking for MeshCore radios over Bluetooth (about 8 seconds)..."):
+                found = asyncio.run(scan_ble(8))
+        except ImportError:
+            ui.fail("Bluetooth needs the 'bleak' package: pip install bleak (or run the installer again)")
+            return None
+        except Exception as exc:
+            ui.fail(f"couldn't scan for Bluetooth radios: {exc}")
+            ui.note("Is Bluetooth switched on on this computer?")
+        if not found:
+            ui.warn("no MeshCore radio found. Switch it on, keep it close, and disconnect it from "
+                    "the MeshCore phone app (a radio takes one Bluetooth connection at a time).")
+        choices = [ui.Choice(f"{name}  ({addr}{f', signal {rssi} dBm' if rssi is not None else ''})", addr)
+                   for addr, name, rssi in found]
+        if current and current not in [a for a, _, _ in found]:
+            choices.append(ui.Choice(f"{current}  (saved before; not seen right now)", current))
+        choices += [ui.Choice("Scan again", "__again"),
+                    ui.Choice("Any MeshCore radio nearby (the first one found)", ""),
+                    ui.Choice("Type its address or name", "__type"),
+                    ui.Choice("Use a USB cable instead", "__usb")]
+        answer = ui.choose("Which Bluetooth radio?", choices)
+        if answer == "__again":
+            continue
+        if answer == "__usb":
+            return None
+        if answer == "__type":
+            return ui.text("Address or name (like MeshCore-Stern):", current or "")
+        return answer
+
+
+def _pick_link(ui, cfg: dict) -> "radiocheck.Link | None":
+    """Ask how to reach the radio: USB port or Bluetooth. None = no radio yet."""
+    while True:
+        port = _pick_port(ui, cfg.get("port"), "reader")
+        if port != "__ble":
+            return radiocheck.Link(port=port) if port else None
+        ble = _pick_ble(ui, cfg.get("ble"))
+        if ble is not None:
+            return radiocheck.Link(ble=ble, pin=cfg.get("pin"))
+
+
+def _check_radio(ui, link) -> bool:
+    link = radiocheck.Link.of(link) if not isinstance(link, radiocheck.Link) else link
+    where = f"Bluetooth ({link.ble or 'any MeshCore radio'})" if link.ble is not None else link.port
     lines: list[str] = []
     try:
-        with ui.spin(f"talking to the radio on {port}..."):
-            asyncio.run(radiocheck.info(port, out=lines.append, pause_vault=False))
+        with ui.spin(f"talking to the radio on {where}..."):
+            asyncio.run(radiocheck.info(link, out=lines.append, pause_vault=False))
     except (Exception, SystemExit) as exc:
-        ui.fail(f"couldn't use the radio on {port}: {exc}")
-        ui.note("is another program (the MeshCore app, another terminal, the Seed Vault "
-                "service) using it?")
+        ui.fail(f"couldn't use the radio on {where}: {exc}")
+        if link.ble is None:
+            ui.note("is another program (the MeshCore app, another terminal, the Seed Vault "
+                    "service) using it?")
         return False
     for line in lines:
         ui.ok(line)
@@ -140,14 +190,34 @@ def _pick_zim(ui, current: str | None) -> str:
 
 # ---------------------------------------------------------------- the two setups
 
-def _setup_reader(ui, cfg: dict, port: str | None, ask: bool) -> int:
+def _setup_reader(ui, cfg: dict, port: str | None, ask: bool, ble: str | None = None,
+                  pin: str | None = None) -> int:
     if ask:
-        port = _pick_port(ui, port or cfg.get("port"), "reader")
-    if port:
-        if not _check_radio(ui, port) and ask and ui.confirm("Pick a different port?", True):
+        link = _pick_link(ui, {**cfg, **({"port": port} if port else {})})
+    elif ble is not None:
+        link = radiocheck.Link(ble=ble, pin=pin)
+    else:
+        link = radiocheck.Link(port=port) if port else None
+    if link is not None and not _check_radio(ui, link):
+        if ask and link.ble is not None and not link.pin and ui.confirm(
+                "Try again with a pairing PIN? (It's in the MeshCore app's settings; often 123456.)", True):
+            link.pin = ui.text("PIN:", "123456")
+            if _check_radio(ui, link):
+                return _save_reader(ui, link, ask)
+        if ask and ui.confirm("Pick a different radio?", True):
             return _setup_reader(ui, cfg, None, ask)
-    config.update(role="reader", port=port)
-    ui.ok("saved: this machine is a reader" + (f", radio on {port}" if port else ", no radio yet"))
+    return _save_reader(ui, link, ask)
+
+
+def _save_reader(ui, link, ask: bool) -> int:
+    if link is None:
+        config.update(role="reader", port=None, ble=None, pin=None)
+    elif link.ble is not None:
+        config.update(role="reader", port=None, ble=link.ble, pin=link.pin)
+    else:
+        config.update(role="reader", port=link.port, ble=None, pin=None)
+    ui.ok("saved: this machine is a reader, radio " + config.radio_label(config.load())
+          if link else "saved: this machine is a reader, no radio yet")
     if ask:
         from . import pages
         if not pages.Authors().all() and ui.confirm(
@@ -220,7 +290,8 @@ def _setup_vault(ui, cfg: dict, port: str | None, zim: str | None, ask: bool,
 
 
 def run(role: str | None = None, port: str | None = None, zim: str | None = None,
-        branch: str | None = None, yes: bool = False, install_service: bool = True) -> int:
+        branch: str | None = None, yes: bool = False, install_service: bool = True,
+        ble: str | None = None, pin: str | None = None) -> int:
     from . import ui
     cfg = config.load()
     ask = ui.interactive() and not yes
@@ -241,7 +312,7 @@ def run(role: str | None = None, port: str | None = None, zim: str | None = None
         if role not in ROLES:
             raise SystemExit(f"role must be reader or vault, not {role!r}")
         if role == "reader":
-            return _setup_reader(ui, cfg, port, ask)
+            return _setup_reader(ui, cfg, port, ask, ble, pin)
         return _setup_vault(ui, cfg, port, zim, ask, install_service)
     except ui.Back:
         ui.warn("setup stopped; run  moss setup  to finish it")
@@ -249,7 +320,8 @@ def run(role: str | None = None, port: str | None = None, zim: str | None = None
 
 
 def main_from_args(args) -> int:
-    return run(args.role, args.port, args.zim, args.branch, args.yes, not args.no_service)
+    return run(args.role, args.port, args.zim, args.branch, args.yes, not args.no_service,
+               args.ble, args.pin)
 
 
 if __name__ == "__main__":                       # pragma: no cover

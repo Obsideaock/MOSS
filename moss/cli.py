@@ -49,6 +49,8 @@ from . import protocol as P
 from .cache import Cache
 from .client import MossClient, MossError, Progress
 from .gateway import Gateway
+from .pagestore import Limits, PageStore
+from .sporeprint import VaultPrint as VaultPrintSim
 from .sources import LocalSource, WikipediaSource
 from .transport import MeshCoreTransport, SimNetwork
 from . import seal as S
@@ -95,6 +97,10 @@ class TermProgress:
             return "checking every byte"
         if p.stage == "done":
             return "done"
+        if p.stage == "uploading":
+            return "sending spores"
+        if p.stage == "checking":
+            return "the Seed Vault is checking the page"
         left = p.total - got
         text = "repairing" if p.stage == "repairing" else "receiving"
         if p.stage == "repairing":
@@ -239,7 +245,9 @@ async def connect(args):
                           gap=args.sim_airtime, wait=args.sim_wait, settle=0.3,
                           log=lambda m: print(f"  seed vault: {m}", file=sys.stderr),
                           keys=S.VaultKeys.load_or_create(practice / "vault", "Practice Seed Vault"),
-                          pad_sizes=args.pad_sizes)
+                          pad_sizes=args.pad_sizes, pages=PageStore(practice / "pages"),
+                          upload_quiet=1.5, library=open_source(args.sim, "en", None)[1],
+                          spore_print=VaultPrintSim(practice / "vault"))
         await gateway.start()
         client = MossClient(net.endpoint("client"), cache, keyring=keyring, nack_spacing=0.2,
                             **{**timing, "quiet": min(args.quiet, 1.5)})
@@ -254,11 +262,13 @@ async def connect(args):
     _old_channel_flag(args)
     tx = await MeshCoreTransport.open(args.port, args.baud, args.channel_name, args.data_type,
                                       log=lambda m: print(f"\n  {m}", file=sys.stderr),
-                                      scope=args.scope)
+                                      scope=args.scope, ble=args.ble, pin=args.pin,
+                                      route=args.route)
     keyring = None if args.plain else S.Keyring()
     client = MossClient(tx, cache, keyring=keyring,
                         notice=lambda m: print(f"\n  {m}", file=sys.stderr), **timing)
-    info = {"simulated": False, "label": f"Radio on {tx.channel_name}"
+    info = {"simulated": False, "label": ("Bluetooth radio" if tx.ble is not None else "Radio")
+                                          + f" on {tx.channel_name}"
                                           + (f", scope {args.scope}" if tx.scoped else "")}
     try:
         yield client, info
@@ -268,20 +278,35 @@ async def connect(args):
 
 # ---------------------------------------------------------------- commands
 
-def _pick_from(results, args) -> str | None:
+def _pick_from(results, args, community: list[dict] | None = None) -> str | None:
+    """Show both groups, numbered on; returns a Wikipedia title or a moss: address."""
     b, dim, rst = (B, DIM, RST) if sys.stdout.isatty() else ("", "", "")
-    for i, r in enumerate(results, 1):
-        print(f"  {b}{i}{rst}  {r.title}" + (f"\n     {dim}{r.blurb}{rst}" if r.blurb else ""))
+    picks: list[str] = []
+    if results and community:
+        print(f"{b}Wikipedia{rst}")
+    for r in results:
+        picks.append(r.title)
+        print(f"  {b}{len(picks)}{rst}  {r.title}" + (f"\n     {dim}{r.blurb}{rst}" if r.blurb else ""))
+    if community:
+        print(f"{b}Community{rst}")
+        for c in community:
+            picks.append(c["a"])
+            who = f"{c['n'] or 'anonymous'} · {c['f']}"
+            print(f"  {b}{len(picks)}{rst}  {c['t']}  {dim}by {who}{rst}"
+                  + (f"\n     {dim}{c['d']}{rst}" if c.get("d") else ""))
+    if not picks:
+        print("nothing found")
+        return None
     if args.pick is not None:
-        return results[args.pick - 1].title if 1 <= args.pick <= len(results) else None
+        return picks[args.pick - 1] if 1 <= args.pick <= len(picks) else None
     if not sys.stdin.isatty():
         return None
     while True:
-        answer = input(f"\nRead which? [1-{len(results)}, q to quit] ").strip().lower()
+        answer = input(f"\nRead which? [1-{len(picks)}, q to quit] ").strip().lower()
         if answer in ("q", "quit", ""):
             return None
-        if answer.isdigit() and 1 <= int(answer) <= len(results):
-            return results[int(answer) - 1].title
+        if answer.isdigit() and 1 <= int(answer) <= len(picks):
+            return picks[int(answer) - 1]
         print("  pick a number from the list")
 
 
@@ -294,7 +319,11 @@ async def cmd_search(args) -> int:
         results = hit[0]
         dim, rst = (DIM, RST) if sys.stdout.isatty() else ("", "")
         print(f"{dim}(saved search, no radio needed){rst}")
-        title = _pick_from(results, args)
+        title = _pick_from(results, args, cache.get_community(query))
+        if title and title.startswith("moss:"):
+            from .pages_cli import _open
+            args.address = title
+            return await _open(args)
         return await _read(args, title) if title else 0
     async with connect(args) as (client, _):
         try:
@@ -304,10 +333,31 @@ async def cmd_search(args) -> int:
             print(f"search failed: {exc}", file=sys.stderr)
             return 1
         progress.finish()
-        title = _pick_from(out.results, args)
+        title = _pick_from(out.results, args, out.community)
         if not title:
             return 0
+        if title.startswith("moss:"):
+            return await _show_page(client, title, args)
         return await _read_with(client, title, args)
+
+
+async def _show_page(client: MossClient, address: str, args) -> int:
+    progress = TermProgress()
+    try:
+        got = await client.page(address, args.refresh, progress)
+    except MossError as exc:
+        progress.finish()
+        print(f"couldn't get {address}: {exc}", file=sys.stderr)
+        return 1
+    progress.finish()
+    page = got.page
+    client.social.note_opened(address)
+    print(f"{page.describe()}\n  signature checked\n")
+    if page.deleted:
+        print("This page was deleted by its author.")
+    else:
+        show_article(page.text(), not args.no_pager)
+    return 0
 
 
 async def _read_with(client: MossClient, title: str, args) -> int:
@@ -394,16 +444,33 @@ async def cmd_gateway(args) -> int:
     keys = S.VaultKeys.load_or_create(args.keys or DEFAULT_VAULT_KEYS, args.name)
     tx = await MeshCoreTransport.open(args.port, args.baud, args.channel_name, args.data_type,
                                       log=lambda m: print(f"  {m}", file=sys.stderr, flush=True),
-                                      scope=args.scope)
+                                      scope=args.scope, ble=args.ble, pin=args.pin, route=args.route)
+    limits = Limits(cap_spores=args.page_cap, per_author_per_day=args.uploads_per_author,
+                    spores_per_day=args.upload_budget, storage_bytes=args.page_storage_mb * 1024 ** 2,
+                    accept_uploads=not args.no_uploads)
+    store = PageStore(Path(args.pages).expanduser() if args.pages
+                      else Path(args.keys or DEFAULT_VAULT_KEYS).expanduser() / "pages", limits)
+    from .sporeprint import VaultPrint, describe as print_describe, summary as print_summary
+    vprint = VaultPrint(Path(args.keys or DEFAULT_VAULT_KEYS))
     gw = Gateway(tx, source, gap=args.gap, rounds=args.rounds, wait=args.wait, keys=keys,
-                 pad_sizes=args.pad_sizes, log_queries=args.log_queries,
-                 log=lambda m: print(m, flush=True))
+                 pad_sizes=args.pad_sizes, log_queries=args.log_queries, pages=store,
+                 library=what, spore_print=vprint, log=lambda m: print(m, flush=True))
     size = (f"articles shortened to about {args.max_bytes} bytes" if args.max_bytes
             else "full articles")
     where = f"{tx.channel_name} (slot {tx.channel})" + (f", scope {args.scope}" if tx.scoped else "")
     print(f"Seed Vault up on {where}, serving {what}, {size}. Ctrl+C to stop.")
     print(f"  fingerprint {keys.fingerprint}  (readers should see the same one)"
           + ("; page sizes padded" if args.pad_sizes else ""), flush=True)
+    if args.route:
+        print("  routing on: spores go back along the route a request came by, when it's known",
+              flush=True)
+    sp = vprint.get()
+    print(f"  spore print: {print_describe(print_summary(sp)) if sp else 'none yet'}", flush=True)
+    n = len(list(store.folder.glob("*/*.mosspage")))
+    print(f"  community pages: {n} stored in {store.folder}; " +
+          (f"uploads on (up to {limits.cap_spores} spores, {limits.per_author_per_day} per author "
+           f"and {limits.spores_per_day} spores in all per day)" if limits.accept_uploads
+           else "uploads off"), flush=True)
     try:
         await gw.run_forever()
     finally:
@@ -493,14 +560,118 @@ def cmd_update(args) -> int:
     return 0
 
 
+async def cmd_vault_info(args) -> int:
+    """A reader asks the Seed Vault about itself (and trades spore prints)."""
+    from . import sporeprint as SP
+    async with connect(args) as (client, info):
+        progress = TermProgress()
+        try:
+            specs = await client.specs(progress)
+        except MossError as exc:
+            progress.finish()
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        progress.finish()
+    for line in describe_specs(specs):
+        print(line)
+    mine = client.prints.mine()
+    if mine:
+        print(f"\nthis reader first sprouted from: {SP.describe(SP.summary(mine))}")
+    return 0
+
+
+def describe_specs(specs: dict) -> list[str]:
+    """Vault specs as lines of text (shared by the CLI and the menu)."""
+    from . import sporeprint as SP
+    from . import PROTOCOL
+    out = [f"{specs.get('name', 'Seed Vault')}  {specs.get('fingerprint', '')}",
+           f"  MOSS {specs.get('moss', '?')}" + ("" if specs.get("protocol", 0) >= PROTOCOL
+                                                  else "  (older than this reader: moss update on the Pi)"),
+           f"  library: {specs.get('library') or 'not said'}"]
+    c = specs.get("community")
+    if c:
+        out.append(f"  community pages: {c['public_pages']} public; uploads "
+                   + (f"on (up to {c['cap_spores']} spores, {c['per_author_per_day']} per author and "
+                      f"{c['spores_per_day']} spores in all per day)" if c["uploads"] else "off"))
+    st = specs.get("storage")
+    if st:
+        out.append(f"  storage: {st['free_mb']} MB free for community pages "
+                   f"({st['used_mb']} of {st['cap_mb']} MB used; {st['disk_free_mb']} MB free on disk)")
+    sp = specs.get("spore_print")
+    out.append(f"  spore print: {SP.describe(sp) if sp else 'none yet'}")
+    if specs.get("print_exchange"):
+        out.append(f"  ({specs['print_exchange']})")
+    return out
+
+
+def cmd_spore_print(args) -> int:
+    """On the Seed Vault: show its spore print, or start the original one."""
+    from . import config
+    from . import sporeprint as SP
+    folder = Path(args.keys or DEFAULT_VAULT_KEYS).expanduser()
+    if config.load().get("role") != "vault" and not (folder / "ed25519.pem").exists():
+        print("this machine isn't a Seed Vault, so it has no spore print of its own. (Readers "
+              "carry vaults' prints for you automatically; see: moss vault-info)", file=sys.stderr)
+        return 1
+    keys = S.VaultKeys.load_or_create(folder)
+    vp = SP.VaultPrint(folder)
+    if args.note:
+        try:
+            sp = vp.start_original(keys, " ".join(args.note))
+        except SP.PrintError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        s = SP.summary(sp)
+        print(f"this vault is now an original: {SP.describe(s)}")
+        print(f"its root fingerprint is {s['origin']}; readers carry this print to vaults that have none")
+        print("restart the Seed Vault so it serves it: sudo systemctl restart moss-gateway")
+        return 0
+    sp = vp.get()
+    print(SP.describe(SP.summary(sp)) if sp else
+          "no spore print yet. Readers bring one the first time they visit with one; "
+          "or start an original: moss spore-print \"a note about this vault\"")
+    return 0
+
+
+async def cmd_selftest(args) -> int:
+    import tempfile
+    from . import selftest
+    args.cache = tempfile.mkdtemp(prefix="moss-selftest-cache-")   # leave saved articles alone
+    query = args.query or ("Shrubbies" if args.sim else "Colorado")
+    async with connect(args) as (client, info):
+        print(f"MOSS self-test over {info['label']}\n")
+        ok = await selftest.run(client, query=query)
+    return 0 if ok else 1
+
+
+async def cmd_radio_link(args) -> int:
+    from . import radiocheck
+    if args.public:
+        freq, bw, sf, cr = radiocheck.PUBLIC_US
+    elif len(args.settings) == 4:
+        try:
+            freq, bw, sf, cr = float(args.settings[0]), float(args.settings[1]), int(args.settings[2]), int(args.settings[3])
+        except ValueError:
+            print("usage: moss radio-link FREQ BW SF CR   (e.g. 915.0 62.5 7 5), or --public")
+            return 1
+    else:
+        print("usage: moss radio-link FREQ BW SF CR   (e.g. 915.0 62.5 7 5), or --public")
+        return 1
+    for note in radiocheck.check_link(freq, bw, sf, cr):
+        print(note)
+    link = radiocheck.Link(args.port, args.ble, args.pin)
+    return 0 if await radiocheck.set_link(link, freq, bw, sf, cr) else 1
+
+
 async def cmd_radio_check(args) -> int:
     from . import radiocheck
+    link = radiocheck.Link(args.port, args.ble, args.pin)
     if args.action == "send":
-        await radiocheck.send(args.port, args.count, args.gap)
+        await radiocheck.send(link, args.count, args.gap)
     elif args.action == "listen":
-        await radiocheck.listen(args.port, args.seconds)
+        await radiocheck.listen(link, args.seconds)
     else:
-        await radiocheck.info(args.port)
+        await radiocheck.info(link)
     return 0
 
 
@@ -519,15 +690,27 @@ def build_parser() -> argparse.ArgumentParser:
     from . import config
     saved = config.load()                    # what `moss setup` remembered; flags still win
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--port", default=saved.get("port"),
+    class _Port(argparse.Action):           # an explicit --port beats a saved Bluetooth radio
+        def __call__(self, parser, ns, value, option=None):
+            ns.port, ns.ble = value, None
+
+    common.add_argument("--port", default=saved.get("port"), action=_Port,
                         help="serial port of your radio (default: the one setup saved, "
                              "else auto-picked if only one)")
+    common.add_argument("--ble", nargs="?", const="", default=saved.get("ble"), metavar="ADDRESS",
+                        help="connect over Bluetooth instead of USB; give the radio's address or "
+                             "name, or nothing for the first MeshCore radio found")
+    common.add_argument("--pin", default=saved.get("pin"),
+                        help="Bluetooth pairing PIN, if the radio asks for one")
     common.add_argument("--baud", type=int, default=115200)
     common.add_argument("--channel-name", default=saved.get("channel") or "#moss",
                         help="the hashtag channel MOSS uses (default #moss); found or created on the radio")
     common.add_argument("--scope", default=saved.get("scope"), help="MeshCore region to keep flooded traffic inside "
                                         "(e.g. a name your local repeaters use; needs firmware 1.12+)")
     common.add_argument("--data-type", type=lambda s: int(s, 0), default=P.MOSS_DATA_TYPE)
+    common.add_argument("--route", action=argparse.BooleanOptionalAction, default=bool(saved.get("route")),
+                        help="send spores along the route the other side's messages came by, instead "
+                             "of flooding every repeater (opt-in; falls back to flooding)")
     common.add_argument("--debug", action="store_true",
                         help="print everything the MeshCore library does (for diagnosing radio trouble)")
     # Old flags, still accepted so existing setups (like the Pi's service) keep working.
@@ -576,6 +759,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write the titles of encrypted requests to the log (off: no record of what people read)")
     g.add_argument("--rounds", type=int, default=10,
                    help="repair rounds before giving up; each only resends what's missing")
+    g.add_argument("--pages", help="folder for community pages (default: next to the keys, "
+                                   "~/.moss/seed-vault/pages)")
+    g.add_argument("--no-uploads", action="store_true",
+                   help="serve community pages already here, but take no new uploads")
+    g.add_argument("--page-cap", type=int, default=250, help="biggest page accepted, in spores (default 250)")
+    g.add_argument("--uploads-per-author", type=int, default=3, help="uploads per author per day (default 3)")
+    g.add_argument("--upload-budget", type=int, default=2000,
+                   help="spores of uploads per day for the whole vault (default 2000, about 55 minutes of airtime)")
+    g.add_argument("--page-storage-mb", type=int, default=2048, help="room for community pages (default 2048 MB)")
     g.add_argument("--wait", type=float, default=30.0,
                    help="seconds to keep listening for the reader's bare-patch list "
                         "(about 5x the client's --quiet, so a few lost lists don't end a transfer)")
@@ -632,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.set_defaults(fn=cmd_export)
 
     from .pages_cli import add_parsers
-    add_parsers(sub)
+    add_parsers(sub, client)
 
     m = sub.add_parser("menu", help="the interactive menu (same as plain `moss`)")
     m.set_defaults(fn=cmd_menu)
@@ -640,6 +832,9 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("setup", help="set this machine up as a reader or a Seed Vault")
     st.add_argument("--role", choices=["reader", "vault"])
     st.add_argument("--port", help="the radio's port (asked if left out)")
+    st.add_argument("--ble", nargs="?", const="", metavar="ADDRESS",
+                    help="the radio is on Bluetooth (its address or name; nothing = any MeshCore radio)")
+    st.add_argument("--pin", help="Bluetooth pairing PIN, if needed")
     st.add_argument("--zim", help="Seed Vault: the .zim library (asked if left out)")
     st.add_argument("--branch", choices=["main", "experimental"], help="which branch `moss update` follows")
     st.add_argument("--yes", action="store_true", help="don't ask anything; use what's given or saved")
@@ -650,6 +845,29 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--branch", choices=["main", "experimental"],
                     help="switch to this branch (remembered); default: the one you follow now")
     up.set_defaults(fn=cmd_update)
+
+    vi = sub.add_parser("vault-info", parents=[client],
+                        help="what your Seed Vault says about itself: version, library, free storage, spore print")
+    vi.set_defaults(fn=cmd_vault_info)
+
+    sp = sub.add_parser("spore-print", help="on the Seed Vault: show its spore print, or start the original")
+    sp.add_argument("note", nargs="*", help="only for an original vault: the note, e.g. "
+                                            "\"The original Seed Vault, ATLAS, CU Boulder\"")
+    sp.add_argument("--keys", help=f"keys folder (default {DEFAULT_VAULT_KEYS})")
+    sp.set_defaults(fn=cmd_spore_print)
+
+    stp = sub.add_parser("selftest", parents=[client],
+                         help="end-to-end test with the Seed Vault: search, upload, read back, replay, delete")
+    stp.add_argument("--query", default=None, help="what to search for in step 1 (default Colorado)")
+    stp.set_defaults(fn=cmd_selftest)
+
+    rl = sub.add_parser("radio-link", parents=[common],
+                        help="put this radio on a dedicated link (its own frequency), or back on the public mesh")
+    rl.add_argument("settings", nargs="*", metavar="FREQ BW SF CR",
+                    help="e.g. 915.0 62.5 7 5 (all MOSS radios must match)")
+    rl.add_argument("--public", action="store_true",
+                    help="back to MeshCore's usual US settings (910.525 62.5 7 5)")
+    rl.set_defaults(fn=cmd_radio_link)
 
     rc = sub.add_parser("radio-check", parents=[common],
                         help="send or listen for pings on #moss to test range (pauses a Seed Vault)")

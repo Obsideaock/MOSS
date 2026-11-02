@@ -426,11 +426,13 @@ class Identity:
              version: int | None = None, when: int | None = None) -> Page:
         """Make and sign a page (markdown None = a deletion). Records it in
         this identity's history; returns the verified Page."""
+        index = self._index()
+        prev = index.get(name)
+        if markdown is None and prev:
+            visibility = prev["visibility"]          # a deletion keeps the page's visibility
         if visibility not in (PUBLIC, UNLISTED):
             raise PageError("visibility must be public or unlisted")
         check_name(name, visibility)
-        index = self._index()
-        prev = index.get(name)
         if prev and prev["visibility"] != visibility and markdown is not None:
             raise PageError(f"{name} was published {prev['visibility']}; a page keeps its "
                             f"visibility (publish under a new name to change it)")
@@ -594,3 +596,32 @@ def save_to_outbox(page: Page, home: Path | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(page.to_bytes())
     return path
+
+
+def outbox_pending(home: Path | None = None) -> list[tuple[Path, Page]]:
+    """Pages waiting to be uploaded: the newest version of each address,
+    oldest first. Older versions of the same address are skipped (the
+    newest replaces them anyway)."""
+    newest: dict[str, tuple[Path, Page]] = {}
+    for f in sorted(outbox(home).glob("*.mosspage"), key=lambda p: p.stat().st_mtime):
+        try:
+            page = load(f.read_bytes())
+        except (OSError, PageError):
+            continue
+        if page.address not in newest or page.version > newest[page.address][1].version:
+            newest[page.address] = (f, page)
+    return sorted(newest.values(), key=lambda fp: fp[0].stat().st_mtime)
+
+
+def mark_sent(page: Page, home: Path | None = None) -> None:
+    """Move this page's outbox files (this version and older) into outbox/sent/."""
+    box = outbox(home)
+    sent = box / "sent"
+    sent.mkdir(parents=True, exist_ok=True)
+    for f in box.glob("*.mosspage"):
+        try:
+            other = load(f.read_bytes())
+        except (OSError, PageError):
+            continue
+        if other.address == page.address and other.version <= page.version:
+            os.replace(f, sent / f.name)
