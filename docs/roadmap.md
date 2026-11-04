@@ -23,8 +23,9 @@ MOSS grows a little at a time. What's done, what's next, and ideas for later.
 - **Overheard spores**: readers keeping public broadcast spores they
   overhear.
 - **Shared-dictionary compression**, for 10–25% smaller short articles.
-- **A "Seed Vault here, join #moss" note** on Public, very rarely, so
-  people can discover MOSS.
+- **Signed updates over the air**: new MOSS versions passed along the
+  mesh, signed by the project so a radio can't be handed fake code. Useful
+  for vaults and readers that never see the internet.
 - **Images**: not planned for now. A single photo would be dozens to
   hundreds of spores, and the nopic library has none.
 
@@ -32,3 +33,6 @@ MOSS grows a little at a time. What's done, what's next, and ideas for later.
 
 MOSS works with the **standard MeshCore companion firmware**. Nobody should
 have to flash a special build to use it.
+
+And MOSS stays off the **Public** channel: it never posts there, not even
+to tell people a Seed Vault exists. People find MOSS by word of mouth.

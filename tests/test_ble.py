@@ -69,6 +69,35 @@ class BleTransportTests(unittest.TestCase):
                 run(MeshCoreTransport.open(None, 115200, ble="MeshCore-Stern", log=self.log.append))
         self.assertEqual(len(self.factory.ble_calls), 3, "should retry a few times")
 
+    def test_stale_pairing_fails_at_once_with_the_fix(self):
+        from moss.transport import StalePairing
+        self.factory.ble_error = Exception(
+            'failed to connect: Error Domain=CBErrorDomain Code=14 '
+            '"Peer removed pairing information"')
+        with mock.patch("moss.transport.sys.platform", "darwin"):
+            with self.assertRaises(StalePairing) as caught:
+                run(MeshCoreTransport.open(None, 115200, ble="A2A0849B", log=self.log.append))
+        self.assertEqual(len(self.factory.ble_calls), 1, "retrying can't fix a stale pairing")
+        text = str(caught.exception)
+        self.assertIn("Forget This Device", text)
+        self.assertIn("old pairing", text)
+        self.assertIsInstance(caught.exception, SystemExit)
+
+    def test_stale_pairing_help_per_system(self):
+        from moss.transport import is_stale_pairing, stale_pairing_help
+        self.assertIn("Remove device", stale_pairing_help("AA", platform="win32"))
+        self.assertIn("bluetoothctl remove AA:BB", stale_pairing_help("AA:BB", platform="linux"))
+        self.assertTrue(is_stale_pairing(Exception("org.bluez.Error.AuthenticationFailed")))
+        self.assertFalse(is_stale_pairing(Exception("device not found")))
+
+    def test_other_errors_still_retry_with_mac_pin_note(self):
+        self.factory.ble_error = Exception("device went away")
+        with mock.patch("moss.transport.asyncio.sleep", new=_no_sleep), \
+                mock.patch("moss.transport.sys.platform", "darwin"):
+            with self.assertRaisesRegex(SystemExit, "your Mac shows its own window"):
+                run(MeshCoreTransport.open(None, 115200, ble="A2A0849B", log=self.log.append))
+        self.assertEqual(len(self.factory.ble_calls), 3)
+
     def test_reconnects_over_bluetooth_not_serial(self):
         async def go():
             tx = await MeshCoreTransport.open(None, 115200, ble="AA:BB", log=self.log.append)
@@ -121,6 +150,30 @@ class BleSettingsTests(unittest.TestCase):
         self.assertEqual((cfg["role"], cfg["ble"], cfg["pin"], cfg["port"]),
                          ("reader", "AA:BB", "123456", None))
         self.assertEqual(config.radio_label(cfg), "Bluetooth (AA:BB)")
+
+    def test_setup_offers_a_retry_after_forgetting_a_stale_pairing(self):
+        import io
+        from rich.console import Console
+        from moss import ui
+        self.factory.ble_error = Exception('Error Domain=CBErrorDomain Code=14 '
+                                           '"Peer removed pairing information"')
+        asked = []
+
+        def confirm(question, default=True):
+            asked.append(question)
+            if "Forgotten the radio" in question:
+                self.factory.ble_error = None          # the user forgot it in Settings
+                return True
+            return False
+        link = radiocheck.Link(ble="A2A0849B")
+        with mock.patch.object(ui, "console", Console(file=io.StringIO())), \
+                mock.patch.object(ui, "confirm", side_effect=confirm), \
+                mock.patch.object(ui, "text", side_effect=AssertionError("no PIN prompt")), \
+                mock.patch.object(setup, "_pick_link", return_value=link):
+            code = setup._setup_reader(ui, config.load(), None, True)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("Forgotten the radio" in q for q in asked), asked)
+        self.assertEqual(config.load()["ble"], "A2A0849B")
 
     def test_radio_check_uses_the_saved_bluetooth_radio(self):
         config.update(ble="AA:BB", pin=None, port=None)

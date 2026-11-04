@@ -687,7 +687,9 @@ async def cmd_web(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="moss", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    from . import config
+    from . import PROTOCOL, __version__, config
+    ap.add_argument("--version", action="version",
+                    version=f"MOSS {__version__} (protocol {PROTOCOL})")
     saved = config.load()                    # what `moss setup` remembered; flags still win
     common = argparse.ArgumentParser(add_help=False)
     class _Port(argparse.Action):           # an explicit --port beats a saved Bluetooth radio

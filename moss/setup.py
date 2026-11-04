@@ -150,14 +150,20 @@ def _pick_link(ui, cfg: dict) -> "radiocheck.Link | None":
             return radiocheck.Link(ble=ble, pin=cfg.get("pin"))
 
 
+_last_failure: BaseException | None = None      # why the last _check_radio failed
+
+
 def _check_radio(ui, link) -> bool:
+    global _last_failure
     link = radiocheck.Link.of(link) if not isinstance(link, radiocheck.Link) else link
     where = f"Bluetooth ({link.ble or 'any MeshCore radio'})" if link.ble is not None else link.port
     lines: list[str] = []
+    _last_failure = None
     try:
         with ui.spin(f"talking to the radio on {where}..."):
             asyncio.run(radiocheck.info(link, out=lines.append, pause_vault=False))
     except (Exception, SystemExit) as exc:
+        _last_failure = exc
         ui.fail(f"couldn't use the radio on {where}: {exc}")
         if link.ble is None:
             ui.note("is another program (the MeshCore app, another terminal, the Seed Vault "
@@ -199,7 +205,23 @@ def _setup_reader(ui, cfg: dict, port: str | None, ask: bool, ble: str | None = 
     else:
         link = radiocheck.Link(port=port) if port else None
     if link is not None and not _check_radio(ui, link):
-        if ask and link.ble is not None and not link.pin and ui.confirm(
+        from .transport import StalePairing
+        if ask and link.ble is not None and isinstance(_last_failure, StalePairing):
+            # The fix happens in the computer's Bluetooth settings; then a plain retry
+            # makes the computer ask for the PIN itself.
+            while ui.confirm("Forgotten the radio in your Bluetooth settings? Try again now?", True):
+                if _check_radio(ui, link):
+                    return _save_reader(ui, link, ask)
+                if not isinstance(_last_failure, StalePairing):
+                    break
+        elif ask and link.ble is not None and sys.platform == "darwin":
+            # macOS only takes a PIN through its own pop-up window, never from MOSS.
+            ui.note("On a Mac the PIN goes into the window macOS pops up (the PIN is in the "
+                    "MeshCore app's settings, often 123456). If no window appeared, forget the "
+                    "radio in System Settings → Bluetooth first.")
+            if ui.confirm("Try again?", True) and _check_radio(ui, link):
+                return _save_reader(ui, link, ask)
+        elif ask and link.ble is not None and not link.pin and ui.confirm(
                 "Try again with a pairing PIN? (It's in the MeshCore app's settings; often 123456.)", True):
             link.pin = ui.text("PIN:", "123456")
             if _check_radio(ui, link):

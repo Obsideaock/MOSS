@@ -13,6 +13,11 @@ It runs on [MeshCore](https://meshcore.io/), the open-source radio mesh,
 with the radios' standard firmware. What you search for and read is
 encrypted: other people on the mesh can't tell what you're reading.
 
+> **Early release.** MOSS works and is tested, but its security hasn't been
+> independently reviewed yet. Please don't rely on it where being found out
+> could put someone in danger, and please
+> [report anything you find](SECURITY.md).
+
 <p align="center">
   <img src="docs/assets/how-it-works.svg" alt="Your computer and radio send an encrypted request over LoRa to a Seed Vault, a Raspberry Pi with Wikipedia on a USB stick. The page comes back as numbered spores; lost ones are sent again." width="100%">
 </p>
@@ -225,6 +230,12 @@ Anyone in radio range can hear MOSS's radio messages, so MOSS encrypts them.
 - **Community pages are signed** by their authors, so nobody can change
   one or pretend to be you.
 
+**One thing to check yourself:** MeshCore radios announce their name (and,
+if set to, their location) to the whole mesh, separately from MOSS. In the
+MeshCore app, turn off sharing your location and don't use your real name
+as the radio's name. Details in
+[your radio's own announcements](docs/privacy.md#your-radios-own-announcements-adverts).
+
 It uses well-known, standard encryption (the same building blocks as
 modern messaging apps), nothing home-made. The full story, including what
 the vault's owner can see, is in [Privacy and encryption](docs/privacy.md).
@@ -257,6 +268,7 @@ off the shared mesh entirely: see
 | [Reference](docs/reference.md) | Troubleshooting, every command, where files are kept, the code layout |
 | [Testing](docs/testing.md) | The automated tests, and testing your own radios |
 | [Roadmap](docs/roadmap.md) | What's done, what's next, ideas for later |
+| [Security](SECURITY.md) | How to report a security problem privately |
 
 ---
 
@@ -321,6 +333,14 @@ See [Troubleshooting](docs/reference.md#troubleshooting).
 
 ## Credits and licences
 
+**MOSS** is free software, copyright (C) 2026 Stern, under the
+[GNU General Public License v3.0](LICENSE) or (at your option) any later
+version. You can use, change and share it; if you share a changed version,
+it has to stay open source under the same licence. It comes with no
+warranty.
+
+MOSS builds on:
+
 - Article text is from **Wikipedia**, under CC BY-SA 4.0. Every article
   carries its source link and licence.
 - Offline Wikipedia comes from **Kiwix** `.zim` files, read with **libzim**
@@ -331,7 +351,7 @@ See [Troubleshooting](docs/reference.md#troubleshooting).
 - Encryption uses **pycryptodome**.
 - Icons are from **Lucide** (ISC licence).
 
-Check each component's licence before redistributing MOSS.
+The notices these licences ask for are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Further reading:
 

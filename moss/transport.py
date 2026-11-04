@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
+import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -221,6 +222,7 @@ class MeshCoreTransport:
 
     @classmethod
     async def _open_ble(cls, baud, channel_name, data_type, log, scope, ble, pin):
+        """Connect over Bluetooth, retrying a little; a stale pairing fails at once."""
         tx = cls(None, baud, channel_name, data_type, log=log, scope=scope, ble=ble, pin=pin)
         last = None
         for attempt in range(1, 4):           # Bluetooth is flakier to set up than a cable
@@ -234,15 +236,21 @@ class MeshCoreTransport:
                 raise
             except Exception as exc:
                 last = exc
+                if is_stale_pairing(exc):       # retrying can't help: the old pairing is the problem
+                    raise StalePairing(stale_pairing_help(ble, exc)) from exc
                 await asyncio.sleep(2.0)
         else:
             who = f" {ble}" if ble else ""
+            if sys.platform == "darwin":
+                pin_help = ("  The first time, your Mac shows its own window asking for the PIN "
+                            "(it's in the MeshCore app's settings, often 123456).")
+            else:
+                pin_help = ("  If your computer asks for a PIN, it's shown in the MeshCore app's settings "
+                            "(often 123456); pairing it once in the computer's Bluetooth settings also works.")
             raise SystemExit(
                 f"couldn't reach the radio{who} over Bluetooth: {last or 'not found'}\n"
                 f"  Is it switched on and nearby? Is the MeshCore phone app disconnected from it "
-                f"(a radio takes one Bluetooth connection at a time)?\n"
-                f"  If your computer asks for a PIN, it's shown in the MeshCore app's settings "
-                f"(often 123456); pairing it once in the computer's Bluetooth settings also works.")
+                f"(a radio takes one Bluetooth connection at a time)?\n" + pin_help)
         tx._task = asyncio.create_task(tx._supervise())
         return tx
 
@@ -581,6 +589,47 @@ def pick_port() -> str:
 
 
 BLE_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # MeshCore's companion service
+
+
+class StalePairing(SystemExit):
+    """The computer remembers a Bluetooth pairing the radio has forgotten."""
+
+
+# How each system reports "my saved pairing keys don't work any more".
+_STALE_SIGNS = (
+    "peer removed pairing",              # macOS: CBErrorDomain Code=14
+    "encryption is insufficient",        # macOS: CBATTErrorDomain Code=15
+    "insufficient encryption",
+    "insufficient authentication",       # Windows / BlueZ ATT errors
+    "authentication failed",             # BlueZ: org.bluez.Error.AuthenticationFailed
+    "authenticationfailed",
+)
+
+
+def is_stale_pairing(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(sign in text for sign in _STALE_SIGNS)
+
+
+def stale_pairing_help(address: str | None, exc: BaseException | None = None,
+                       platform: str | None = None) -> str:
+    """What to do when the computer and the radio disagree about being paired."""
+    platform = platform or sys.platform
+    who = address or "the radio"
+    if platform == "darwin":
+        steps = ("System Settings → Bluetooth, hover over the MeshCore radio, click ⓘ, "
+                 "then Forget This Device")
+    elif platform.startswith("win"):
+        steps = ("Settings → Bluetooth & devices → Devices, find the MeshCore radio, "
+                 "click ⋯ and choose Remove device")
+    else:
+        steps = "run  bluetoothctl remove " + (address or "<the radio's address>")
+    return (f"couldn't reach {who} over Bluetooth: this computer remembers an old pairing "
+            f"with the radio, but the radio has forgotten it (this happens after the radio is "
+            f"reflashed, reset, or paired with another computer)"
+            + (f".\n  ({exc})" if exc else ".") +
+            f"\n  Fix: forget the radio on this computer ({steps}), then try again. "
+            f"You'll be asked for the PIN: it's in the MeshCore app's settings, often 123456.")
 
 
 async def scan_ble(seconds: float = 6.0) -> list[tuple[str, str, int | None]]:

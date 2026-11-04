@@ -67,7 +67,17 @@ when a computer won't show the radio's COM port.
 4. If your computer asks for a pairing PIN, it's in the MeshCore app's
    settings for that radio (often `123456`). Setup offers to retry with a
    PIN if the first try fails. Pairing it once in the computer's own
-   Bluetooth settings also works.
+   Bluetooth settings also works. **On a Mac**, the PIN always goes into
+   the window macOS pops up, never into the terminal.
+
+**Never asked for a PIN, and it won't connect?** Your computer probably
+remembers an old pairing that the radio has forgotten (after reflashing or
+resetting the radio, or pairing it with another computer). The computer
+keeps using the old keys, so it never asks for the PIN. MOSS spots this and
+says so. Forget the radio in your computer's Bluetooth settings (Mac:
+System Settings → Bluetooth → ⓘ → **Forget This Device**; Windows:
+**Remove device**; Linux: `bluetoothctl remove ADDRESS`), then try again.
+This time it asks for the PIN.
 
 From then on everything uses it automatically. By hand: `moss web --ble`
 (the first MeshCore radio found), `moss web --ble MeshCore-Stern`, or
