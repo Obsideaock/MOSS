@@ -58,6 +58,7 @@ class Factory:
         self.ble_calls: list = []       # (address, pin) for each Bluetooth connect
         self.ble_missing = False        # no Bluetooth radio in range
         self.ble_error = None           # raised by a Bluetooth connect (e.g. a stale pairing)
+        self.ble_gate = None            # called on each Bluetooth connect; may raise
         self.refuse_routes = False      # firmware that won't send along a given path
 
     async def create_serial(self, port, baud):
@@ -73,6 +74,8 @@ class Factory:
         self.ble_calls.append((address, pin))
         if self.ble_error is not None:
             raise self.ble_error
+        if self.ble_gate is not None:
+            self.ble_gate()
         if self.ble_missing:
             return None                  # nothing answered the scan
         return await self.create_serial(f"ble:{address}", 0)

@@ -74,7 +74,7 @@ class BleTransportTests(unittest.TestCase):
         self.factory.ble_error = Exception(
             'failed to connect: Error Domain=CBErrorDomain Code=14 '
             '"Peer removed pairing information"')
-        with mock.patch("moss.transport.sys.platform", "darwin"):
+        with mock.patch("moss.blepair.system", return_value="darwin"):
             with self.assertRaises(StalePairing) as caught:
                 run(MeshCoreTransport.open(None, 115200, ble="A2A0849B", log=self.log.append))
         self.assertEqual(len(self.factory.ble_calls), 1, "retrying can't fix a stale pairing")
@@ -93,7 +93,7 @@ class BleTransportTests(unittest.TestCase):
     def test_other_errors_still_retry_with_mac_pin_note(self):
         self.factory.ble_error = Exception("device went away")
         with mock.patch("moss.transport.asyncio.sleep", new=_no_sleep), \
-                mock.patch("moss.transport.sys.platform", "darwin"):
+                mock.patch("moss.blepair.system", return_value="darwin"):
             with self.assertRaisesRegex(SystemExit, "your Mac shows its own window"):
                 run(MeshCoreTransport.open(None, 115200, ble="A2A0849B", log=self.log.append))
         self.assertEqual(len(self.factory.ble_calls), 3)

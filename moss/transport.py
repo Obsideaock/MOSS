@@ -241,7 +241,7 @@ class MeshCoreTransport:
                 await asyncio.sleep(2.0)
         else:
             who = f" {ble}" if ble else ""
-            if sys.platform == "darwin":
+            if _system() == "darwin":
                 pin_help = ("  The first time, your Mac shows its own window asking for the PIN "
                             "(it's in the MeshCore app's settings, often 123456).")
             else:
@@ -260,6 +260,11 @@ class MeshCoreTransport:
         from meshcore import EventType, MeshCore
         from .channel import ChannelError, find_or_create
         if self.ble is not None:
+            from . import blepair
+            if self.pin and self.ble and blepair.supported():
+                # meshcore never hands the PIN to the system, and bleak on Windows can't
+                # use one, so pair here first (does nothing if already paired).
+                await blepair.pair(self.ble, self.pin)
             mc = await MeshCore.create_ble(address=self.ble or None, pin=self.pin)
             if mc is None or not getattr(mc, "is_connected", True):
                 raise ConnectionError("no MeshCore radio answered over Bluetooth")
@@ -591,6 +596,11 @@ def pick_port() -> str:
 BLE_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # MeshCore's companion service
 
 
+def _system() -> str:
+    from .blepair import system
+    return system()
+
+
 class StalePairing(SystemExit):
     """The computer remembers a Bluetooth pairing the radio has forgotten."""
 
@@ -614,7 +624,7 @@ def is_stale_pairing(exc: BaseException) -> bool:
 def stale_pairing_help(address: str | None, exc: BaseException | None = None,
                        platform: str | None = None) -> str:
     """What to do when the computer and the radio disagree about being paired."""
-    platform = platform or sys.platform
+    platform = platform or _system()
     who = address or "the radio"
     if platform == "darwin":
         steps = ("System Settings → Bluetooth, hover over the MeshCore radio, click ⓘ, "

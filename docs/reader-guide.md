@@ -64,11 +64,17 @@ when a computer won't show the radio's COM port.
 3. Run `moss setup` (or *Settings → Radio* in the menu), pick **Bluetooth
    instead** at the port question, and choose the radio from the scan
    (it shows up as `MeshCore-<its name>`).
-4. If your computer asks for a pairing PIN, it's in the MeshCore app's
-   settings for that radio (often `123456`). Setup offers to retry with a
-   PIN if the first try fails. Pairing it once in the computer's own
-   Bluetooth settings also works. **On a Mac**, the PIN always goes into
-   the window macOS pops up, never into the terminal.
+4. **The PIN.** The first time, the radio wants its pairing PIN. It's in
+   the MeshCore app, in that radio's settings (often `123456`, but yours
+   may differ). How it goes in depends on your computer:
+   - **Windows:** if the first connection fails, setup offers to pair with
+     the PIN. Type it in, and MOSS pairs the radio itself, forgetting any
+     old pairing first. You don't need Windows' Bluetooth settings at all
+     (they often don't even list MeshCore radios).
+   - **Mac:** macOS shows its own window asking for the PIN. It never goes
+     into the terminal.
+   - **Linux:** pair once with `bluetoothctl` (`scan on`, then
+     `pair ADDRESS`, and type the PIN when asked). Setup shows the steps.
 
 **Never asked for a PIN, and it won't connect?** Your computer probably
 remembers an old pairing that the radio has forgotten (after reflashing or

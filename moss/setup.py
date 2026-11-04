@@ -205,8 +205,13 @@ def _setup_reader(ui, cfg: dict, port: str | None, ask: bool, ble: str | None = 
     else:
         link = radiocheck.Link(port=port) if port else None
     if link is not None and not _check_radio(ui, link):
+        from . import blepair
         from .transport import StalePairing
-        if ask and link.ble is not None and isinstance(_last_failure, StalePairing):
+        if ask and link.ble and blepair.supported():
+            # Windows: MOSS pairs the radio itself with its PIN, forgetting any old pairing.
+            if _pair_with_pin(ui, link):
+                return _save_reader(ui, link, ask)
+        elif ask and link.ble is not None and isinstance(_last_failure, StalePairing):
             # The fix happens in the computer's Bluetooth settings; then a plain retry
             # makes the computer ask for the PIN itself.
             while ui.confirm("Forgotten the radio in your Bluetooth settings? Try again now?", True):
@@ -214,21 +219,51 @@ def _setup_reader(ui, cfg: dict, port: str | None, ask: bool, ble: str | None = 
                     return _save_reader(ui, link, ask)
                 if not isinstance(_last_failure, StalePairing):
                     break
-        elif ask and link.ble is not None and sys.platform == "darwin":
+        elif ask and link.ble is not None and blepair.system() == "darwin":
             # macOS only takes a PIN through its own pop-up window, never from MOSS.
             ui.note("On a Mac the PIN goes into the window macOS pops up (the PIN is in the "
                     "MeshCore app's settings, often 123456). If no window appeared, forget the "
                     "radio in System Settings → Bluetooth first.")
             if ui.confirm("Try again?", True) and _check_radio(ui, link):
                 return _save_reader(ui, link, ask)
-        elif ask and link.ble is not None and not link.pin and ui.confirm(
-                "Try again with a pairing PIN? (It's in the MeshCore app's settings; often 123456.)", True):
-            link.pin = ui.text("PIN:", "123456")
-            if _check_radio(ui, link):
+        elif ask and link.ble is not None:
+            # Linux: BlueZ asks for the PIN through its own pairing agent.
+            ui.note(f"To pair with the radio's PIN on Linux: run  bluetoothctl , then  "
+                    f"scan on , then  pair {link.ble or '<address>'}  and type the PIN from the "
+                    f"MeshCore app when asked.")
+            if ui.confirm("Paired it? Try again?", True) and _check_radio(ui, link):
                 return _save_reader(ui, link, ask)
         if ask and ui.confirm("Pick a different radio?", True):
             return _setup_reader(ui, cfg, None, ask)
     return _save_reader(ui, link, ask)
+
+
+def _pair_with_pin(ui, link) -> bool:
+    """Pair (again) with the radio's PIN, then check it answers. Windows only."""
+    from . import blepair
+    if not ui.confirm("Pair with the radio using its PIN? (MOSS forgets any old pairing with "
+                      "it first.)", True):
+        return False
+    ui.note("The PIN is in the MeshCore app: open that radio's settings. "
+            "Disconnect the phone app from the radio before pairing.")
+    while True:
+        pin = ui.text("Radio's PIN:", link.pin or "")
+        try:
+            with ui.spin("pairing with the radio..."):
+                asyncio.run(blepair.pair(link.ble, pin, fresh=True))
+        except blepair.WrongPin as exc:
+            ui.fail(str(exc))
+            if ui.confirm("Try a different PIN?", True):
+                continue
+            return False
+        except (Exception, SystemExit) as exc:
+            ui.fail(f"pairing failed: {exc}")
+            if ui.confirm("Try pairing again?", True):
+                continue
+            return False
+        ui.ok("paired")
+        link.pin = pin
+        return _check_radio(ui, link)
 
 
 def _save_reader(ui, link, ask: bool) -> int:
