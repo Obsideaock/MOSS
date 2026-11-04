@@ -702,8 +702,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--ble", nargs="?", const="", default=saved.get("ble"), metavar="ADDRESS",
                         help="connect over Bluetooth instead of USB; give the radio's address or "
                              "name, or nothing for the first MeshCore radio found")
-    common.add_argument("--pin", default=saved.get("pin"),
-                        help="Bluetooth pairing PIN, if the radio asks for one")
+    common.add_argument("--pin", default=None,
+                        help="Bluetooth pairing PIN for this run (Windows; never saved)")
     common.add_argument("--baud", type=int, default=115200)
     common.add_argument("--channel-name", default=saved.get("channel") or "#moss",
                         help="the hashtag channel MOSS uses (default #moss); found or created on the radio")

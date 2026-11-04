@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,17 +7,23 @@ name = "moss-mesh"
 version = "0.6.0"
 description = "MOSS: Wikipedia and community pages over MeshCore LoRa radios"
 requires-python = ">=3.10"
-license = { text = "GPL-3.0-or-later" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 dynamic = ["dependencies"]
 
 [project.scripts]
 moss = "moss.cli:main"
 
 [tool.setuptools]
-packages = ["moss"]
+# The formula fonts live in folders under moss/static; list them so setuptools
+# ships them as data instead of warning that they look like packages.
+packages = ["moss", "moss.static", "moss.static.katex", "moss.static.katex.fonts"]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.package-data]
-moss = ["index.html", "static/**/*"]
+moss = ["index.html"]
+"moss.static" = ["*"]
+"moss.static.katex" = ["*"]
+"moss.static.katex.fonts" = ["*"]

@@ -208,7 +208,8 @@ class WindowsSetupTests(unittest.TestCase):
         for patch in (mock.patch.dict(os.environ, {"MOSS_HOME": self.home}),
                       mock.patch.object(blepair, "_winrt", fake_winrt(self.radio)),
                       mock.patch.object(blepair, "system", return_value="win32"),
-                      mock.patch("moss.transport.asyncio.sleep", new=_no_sleep)):
+                      mock.patch("moss.transport.asyncio.sleep", new=_no_sleep),
+                      mock.patch.object(setup, "PAIR_SETTLE_WAITS", (0, 0, 0))):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -232,12 +233,25 @@ class WindowsSetupTests(unittest.TestCase):
         self.assertEqual(self._run_setup(["654321"]), 0)
         self.assertTrue(self.radio.paired)
         cfg = config.load()
-        self.assertEqual((cfg["ble"], cfg["pin"]), (ADDR, "654321"))
+        self.assertEqual(cfg["ble"], ADDR)
+        self.assertNotIn("pin", cfg)                  # some radios change PIN every pairing
 
     def test_a_wrong_pin_asks_again(self):
         self.assertEqual(self._run_setup(["123456", "654321"]), 0)
         self.assertEqual(len(self.radio.pair_calls), 2)
-        self.assertEqual(config.load()["pin"], "654321")
+        self.assertTrue(self.radio.paired)
+
+    def test_waits_for_windows_to_settle_after_pairing(self):
+        """Real Windows: the first connection right after pairing fails, a later one works."""
+        tries = []
+
+        def gate():
+            tries.append(1)
+            if not self.radio.paired or len(tries) < 3:
+                raise ConnectionError("Failed to connect to device")
+        self.factory.ble_gate = gate
+        self.assertEqual(self._run_setup(["654321"]), 0)
+        self.assertGreaterEqual(len(tries), 3)
 
     def test_saved_pin_pairs_before_connecting(self):
         """Later runs: the transport pairs first when it has a PIN (no-op once paired)."""

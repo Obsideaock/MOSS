@@ -441,11 +441,11 @@ def reader_menu() -> None:
     def settings():
         def port():
             link = setup._pick_link(ui, config.load())
-            if link is not None and setup._check_radio(ui, link):
-                setup._save_reader(ui, link, False)
-            elif link is None:
-                config.update(port=None, ble=None, pin=None)
+            if link is None:
+                config.update(port=None, ble=None)
                 ui.ok("no radio set")
+            elif setup._check_radio(ui, link) or setup._retry_radio(ui, link):
+                setup._save_reader(ui, link, False)
 
         def scope():
             s = ui.text("MeshCore region to keep traffic inside (blank for none):",

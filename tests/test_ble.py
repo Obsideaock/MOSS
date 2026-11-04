@@ -7,6 +7,7 @@ These use the fake radio; with real hardware, `moss setup` → Bluetooth, then
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -49,11 +50,25 @@ class BleTransportTests(unittest.TestCase):
             await tx.close()
             return tx, heard, radio
         tx, heard, radio = run(go())
-        self.assertEqual(self.factory.ble_calls, [("AA:BB:CC:DD:EE:FF", "123456")])
+        # the PIN never reaches meshcore: there it only triggers a pairing macOS can't do
+        self.assertEqual(self.factory.ble_calls, [("AA:BB:CC:DD:EE:FF", None)])
         self.assertEqual(heard, [b"\x02over the air"])
         self.assertEqual(radio.sent, [(tx.channel, b"\x05ask")])
         self.assertIn("Bluetooth", tx.where)
         self.assertTrue(any(n == "#moss" for n, _ in self.factory.slots))
+
+    def test_asks_again_when_the_radio_description_is_late(self):
+        """Bluetooth radios (a T-Beam, say) can answer the first 'who are you?' too late."""
+        self.factory.describe_late = True
+
+        async def go():
+            tx = await MeshCoreTransport.open(None, 115200, ble="AA:BB", log=self.log.append)
+            info = tx.radio_info()
+            await tx.close()
+            return info, self.factory.radios[-1].appstarts
+        info, asks = run(go())
+        self.assertEqual(info.get("radio_freq"), 910.525)
+        self.assertEqual(asks, 2)
 
     def test_any_radio_means_no_address(self):
         async def go():
@@ -130,9 +145,9 @@ class BleSettingsTests(unittest.TestCase):
 
     def test_saved_bluetooth_radio_is_used_and_port_overrides_it(self):
         from moss.cli import build_parser
-        config.update(ble="AA:BB", pin="123456", port=None)
+        config.update(ble="AA:BB", port=None)
         args = build_parser().parse_args(["search", "x"])
-        self.assertEqual((args.ble, args.pin, args.port), ("AA:BB", "123456", None))
+        self.assertEqual((args.ble, args.pin, args.port), ("AA:BB", None, None))
         args = build_parser().parse_args(["search", "x", "--port", "COM5"])
         self.assertEqual((args.ble, args.port), (None, "COM5"))
         config.update(ble=None, port="COM12")
@@ -147,9 +162,18 @@ class BleSettingsTests(unittest.TestCase):
             code = setup.run(role="reader", ble="AA:BB", pin="123456", yes=True)
         self.assertEqual(code, 0)
         cfg = config.load()
-        self.assertEqual((cfg["role"], cfg["ble"], cfg["pin"], cfg["port"]),
-                         ("reader", "AA:BB", "123456", None))
+        self.assertEqual((cfg["role"], cfg["ble"], cfg["port"]), ("reader", "AA:BB", None))
+        self.assertNotIn("pin", cfg)
+        self.assertNotIn("pin", json.loads(config.path().read_text()))
         self.assertEqual(config.radio_label(cfg), "Bluetooth (AA:BB)")
+
+    def test_an_old_saved_pin_is_ignored_and_dropped(self):
+        config.path().parent.mkdir(parents=True, exist_ok=True)
+        config.path().write_text(json.dumps({"role": "reader", "ble": "AA:BB", "pin": "123456"}))
+        self.assertNotIn("pin", config.load())
+        config.update(scope=None)
+        self.assertNotIn("pin", json.loads(config.path().read_text()))
+        self.assertIsNone(radiocheck.Link.of(None).pin)
 
     def test_setup_offers_a_retry_after_forgetting_a_stale_pairing(self):
         import io
@@ -176,7 +200,7 @@ class BleSettingsTests(unittest.TestCase):
         self.assertEqual(config.load()["ble"], "A2A0849B")
 
     def test_radio_check_uses_the_saved_bluetooth_radio(self):
-        config.update(ble="AA:BB", pin=None, port=None)
+        config.update(ble="AA:BB", port=None)
         out = []
         asyncio.run(radiocheck.send(None, count=2, gap=0, out=out.append))
         self.assertEqual(self.factory.ble_calls, [("AA:BB", None)])

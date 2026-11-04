@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -282,6 +283,30 @@ class InstallerScriptTests(unittest.TestCase):
         for f in ("install.sh", "install.ps1"):
             self.assertIn("github.com/Obsideaock/MOSS", (ROOT / f).read_text(encoding="utf-8"))
 
+
+
+class InstallPackagesTests(unittest.TestCase):
+    """moss update's pip step: quiet when it works, the reason when it doesn't."""
+
+    def _run(self, code, stderr):
+        from moss import updater
+        out = []
+        done = types.SimpleNamespace(returncode=code, stdout="", stderr=stderr)
+        with mock.patch.object(updater.subprocess, "run", return_value=done) as run:
+            ok = updater.install_packages(Path("/repo"), out.append)
+        self.assertTrue(run.call_args.kwargs.get("capture_output"))
+        return ok, out
+
+    def test_build_warnings_are_hidden_when_it_works(self):
+        ok, out = self._run(0, "BuildBackendWarning: Editable installation.\n" * 40)
+        self.assertTrue(ok)
+        self.assertEqual(out, ["updating Python packages...", "Python packages up to date"])
+
+    def test_the_reason_is_shown_when_it_fails(self):
+        ok, out = self._run(1, "lots of noise\nERROR: No matching distribution found for libzim")
+        self.assertFalse(ok)
+        self.assertTrue(any("No matching distribution" in line for line in out), out)
+        self.assertIn("pip had trouble", out[-1])
 
 if __name__ == "__main__":
     unittest.main()

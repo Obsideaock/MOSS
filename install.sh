@@ -112,8 +112,14 @@ if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c 'import sys' >/dev/null 
   python3 -m venv .venv
 fi
 echo "installing Python packages (the first time takes a few minutes on a Pi)..."
-.venv/bin/python -m pip install --quiet --upgrade pip
-.venv/bin/python -m pip install --quiet -e .
+PIPLOG="$(mktemp)"            # pip prints pages of harmless build notes; show them only on failure
+if ! { .venv/bin/python -m pip install --quiet --upgrade pip &&
+       .venv/bin/python -m pip install --quiet -e .; } >"$PIPLOG" 2>&1; then
+  tail -n 30 "$PIPLOG"
+  rm -f "$PIPLOG"
+  die "installing the Python packages failed (see above)"
+fi
+rm -f "$PIPLOG"
 ok "Python packages installed"
 
 # ---- 4. the moss command

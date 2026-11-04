@@ -140,9 +140,16 @@ if (-not $healthy) {
     if ($LASTEXITCODE -ne 0) { Die "couldn't make the Python environment" }
 }
 Write-Host "  installing Python packages..."
-& $VenvPy -m pip install --quiet --upgrade pip
-& $VenvPy -m pip install --quiet -e $Dir
-if ($LASTEXITCODE -ne 0) { Die "installing the Python packages failed (see above)" }
+# pip prints pages of harmless build notes; show them only on failure.
+$PipLog = New-TemporaryFile
+& $VenvPy -m pip install --quiet --upgrade pip *> $PipLog
+if ($LASTEXITCODE -eq 0) { & $VenvPy -m pip install --quiet -e $Dir *> $PipLog }
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $PipLog -Tail 30
+    Remove-Item $PipLog -ErrorAction SilentlyContinue
+    Die "installing the Python packages failed (see above)"
+}
+Remove-Item $PipLog -ErrorAction SilentlyContinue
 Ok "Python packages installed"
 
 # ---- 4. the moss command

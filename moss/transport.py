@@ -265,15 +265,19 @@ class MeshCoreTransport:
                 # meshcore never hands the PIN to the system, and bleak on Windows can't
                 # use one, so pair here first (does nothing if already paired).
                 await blepair.pair(self.ble, self.pin)
-            mc = await MeshCore.create_ble(address=self.ble or None, pin=self.pin)
+            # Never pass the PIN to meshcore: it only makes the library call a pairing
+            # that macOS doesn't support (the connection then fails) and that can't use
+            # a PIN on Windows anyway. Pairing with a PIN is done above, or by the system.
+            mc = await MeshCore.create_ble(address=self.ble or None)
             if mc is None or not getattr(mc, "is_connected", True):
                 raise ConnectionError("no MeshCore radio answered over Bluetooth")
-            info = getattr(mc, "self_info", None)
-            self.radio_name = (info or {}).get("name", "") if isinstance(info, dict) else ""
         else:
             mc = await MeshCore.create_serial(self.port, self.baud)
             if mc is None or not getattr(mc, "is_connected", True):
                 raise ConnectionError("no answer from the radio")
+        await _ensure_self_info(mc, self.log)
+        info = getattr(mc, "self_info", None)
+        self.radio_name = (info or {}).get("name", "") if isinstance(info, dict) else ""
         self._EventType = EventType
         try:
             self.channel, _ = await find_or_create(mc, self.channel_name, EventType, self.log)
@@ -594,6 +598,32 @@ def pick_port() -> str:
 
 
 BLE_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # MeshCore's companion service
+
+
+async def _ensure_self_info(mc, log) -> None:
+    """Make sure we have the radio's description (name, frequency, SF, ...).
+
+    The library asks once while connecting and waits only 2 seconds. Over
+    Bluetooth, especially straight after pairing or on ESP32 radios like the
+    T-Beam, the answer can come later than that: the link works, but the
+    radio's settings are missing. Ask again, more patiently.
+    """
+    info = getattr(mc, "self_info", None)
+    if isinstance(info, dict) and info.get("radio_freq"):
+        return
+    ask = getattr(getattr(mc, "commands", None), "send_appstart", None)
+    if ask is None:
+        return
+    for wait in (5, 8):
+        try:
+            await ask(timeout=wait)
+        except Exception as exc:              # never fatal: MOSS works without the description
+            log(f"asking the radio to describe itself failed: {exc}")
+            return
+        info = getattr(mc, "self_info", None)
+        if isinstance(info, dict) and info.get("radio_freq"):
+            return
+    log("the radio didn't describe itself (name, frequency...); everything else still works")
 
 
 def _system() -> str:
