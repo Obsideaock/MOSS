@@ -8,7 +8,11 @@ the command line always wins over the saved value.
     port      the radio's serial port (COM12, /dev/serial/by-id/...), or null
     ble       Bluetooth instead of a cable: the radio's address or name, "" for
               any MeshCore radio nearby, null for USB
-    pin       Bluetooth pairing PIN, if the radio needs one
+
+The Bluetooth pairing PIN is never saved: some radios show a new one for
+each pairing, and on a Mac a saved PIN stops the connection working. It's
+asked for only at the moment of pairing. An older file's "pin" is ignored
+and dropped the next time settings are saved.
     channel   the hashtag channel, #moss unless changed
     scope     MeshCore region to keep flooded traffic inside, or null
     route     send bulk traffic along the learned route instead of flooding (opt-in)
@@ -21,7 +25,7 @@ import json
 import os
 from pathlib import Path
 
-DEFAULTS = {"role": None, "port": None, "ble": None, "pin": None, "channel": "#moss",
+DEFAULTS = {"role": None, "port": None, "ble": None, "channel": "#moss",
             "scope": None, "branch": "main", "route": False}
 
 

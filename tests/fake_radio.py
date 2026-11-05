@@ -57,6 +57,9 @@ class Factory:
         self.refuse_sends = 0           # how many sends the radio will refuse next
         self.ble_calls: list = []       # (address, pin) for each Bluetooth connect
         self.ble_missing = False        # no Bluetooth radio in range
+        self.ble_error = None           # raised by a Bluetooth connect (e.g. a stale pairing)
+        self.ble_gate = None            # called on each Bluetooth connect; may raise
+        self.describe_late = False      # the first self-description is lost (slow Bluetooth)
         self.refuse_routes = False      # firmware that won't send along a given path
 
     async def create_serial(self, port, baud):
@@ -70,6 +73,10 @@ class Factory:
     async def create_ble(self, address=None, pin=None, **kw):
         """Bluetooth: same radio, reached differently. Records how it was asked for."""
         self.ble_calls.append((address, pin))
+        if self.ble_error is not None:
+            raise self.ble_error
+        if self.ble_gate is not None:
+            self.ble_gate()
         if self.ble_missing:
             return None                  # nothing answered the scan
         return await self.create_serial(f"ble:{address}", 0)
@@ -108,7 +115,17 @@ class FakeRadio:
             get_msg=self.get_msg, send_channel_data=self.send_channel_data,
             send_device_query=self.send_device_query, get_channel=self.get_channel,
             set_channel=self.set_channel, set_flood_scope=self.set_flood_scope,
-            send_chan_msg=self.send_chan_msg, set_radio=self.set_radio)
+            send_chan_msg=self.send_chan_msg, set_radio=self.set_radio,
+            send_appstart=self.send_appstart)
+        if factory.describe_late:     # the radio's first self-description got lost
+            self._described, self.self_info = self.self_info, {}
+        self.appstarts = 0
+
+    async def send_appstart(self, timeout=None):
+        self.appstarts += 1
+        if self.factory.describe_late and self.appstarts >= 2:
+            self.self_info = dict(getattr(self, "_described", self.self_info))
+        return Event("SELF_INFO", self.self_info)
 
     @property
     def is_connected(self):

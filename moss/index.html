@@ -451,6 +451,9 @@ function day(ts) { const d = new Date(ts * 1000); return d.toISOString().slice(0
 
 /* ---------- reading text: a deliberately small markdown subset ---------- */
 const SOURCE = /^\*Source:\s*Wikipedia,\s*(\S+?)\s*[—-]+\s*text under (.+?)\.(?=\s|\*)/;
+// Only plain web links ever become clickable: a page's text comes from strangers, and a
+// "javascript:" or "data:" link would run inside the reader, which can sign pages as you.
+const webUrl = (u) => /^https?:\/\/[^\s"'<>]+$/i.test(u || "") ? u : null;
 
 /* Formulas: KaTeX is bundled with the reader (no internet needed). If it
    hasn't loaded, show the LaTeX source rather than nothing. */
@@ -643,7 +646,7 @@ function renderText(md, { caret = false, withTitle = true, titles = [] } = {}) {
     const src = SOURCE.exec(text);
     if (src) {
       box.append(callout("info", "From Wikipedia", "info",
-        h("p", {}, h("a", { href: src[1], target: "_blank", rel: "noopener noreferrer" }, "Original article"),
+        h("p", {}, (webUrl(src[1]) ? h("a", { href: webUrl(src[1]), target: "_blank", rel: "noopener noreferrer" }, "Original article") : "Original article"),
           `. Text under ${src[2]}.`)));
       return;
     }
@@ -844,7 +847,7 @@ function properties(r) {
     h("div", { class: "key" }, svg(icon, "s"), key), h("div", { class: "val" }, val));
   return h("details", { class: "properties", open: "" },
     h("summary", {}, svg("chevron", "s"), "Properties"),
-    m ? row("link", "source", h("a", { href: m[1], target: "_blank", rel: "noopener noreferrer" }, m[1])) : null,
+    m ? row("link", "source", webUrl(m[1]) ? h("a", { href: m[1], target: "_blank", rel: "noopener noreferrer" }, m[1]) : m[1]) : null,
     m ? row("scale", "license", m[2]) : null,
     row("calendar", "fetched", `${day(r.fetched_at)}, ${how}`),
     row("tag", "tags", [h("span", { class: "tag" }, "#wikipedia"), h("span", { class: "tag" }, "#moss")]));

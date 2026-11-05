@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
+import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -221,6 +222,7 @@ class MeshCoreTransport:
 
     @classmethod
     async def _open_ble(cls, baud, channel_name, data_type, log, scope, ble, pin):
+        """Connect over Bluetooth, retrying a little; a stale pairing fails at once."""
         tx = cls(None, baud, channel_name, data_type, log=log, scope=scope, ble=ble, pin=pin)
         last = None
         for attempt in range(1, 4):           # Bluetooth is flakier to set up than a cable
@@ -234,15 +236,21 @@ class MeshCoreTransport:
                 raise
             except Exception as exc:
                 last = exc
+                if is_stale_pairing(exc):       # retrying can't help: the old pairing is the problem
+                    raise StalePairing(stale_pairing_help(ble, exc)) from exc
                 await asyncio.sleep(2.0)
         else:
             who = f" {ble}" if ble else ""
+            if _system() == "darwin":
+                pin_help = ("  The first time, your Mac shows its own window asking for the PIN "
+                            "(it's in the MeshCore app's settings, often 123456).")
+            else:
+                pin_help = ("  If your computer asks for a PIN, it's shown in the MeshCore app's settings "
+                            "(often 123456); pairing it once in the computer's Bluetooth settings also works.")
             raise SystemExit(
                 f"couldn't reach the radio{who} over Bluetooth: {last or 'not found'}\n"
                 f"  Is it switched on and nearby? Is the MeshCore phone app disconnected from it "
-                f"(a radio takes one Bluetooth connection at a time)?\n"
-                f"  If your computer asks for a PIN, it's shown in the MeshCore app's settings "
-                f"(often 123456); pairing it once in the computer's Bluetooth settings also works.")
+                f"(a radio takes one Bluetooth connection at a time)?\n" + pin_help)
         tx._task = asyncio.create_task(tx._supervise())
         return tx
 
@@ -252,15 +260,24 @@ class MeshCoreTransport:
         from meshcore import EventType, MeshCore
         from .channel import ChannelError, find_or_create
         if self.ble is not None:
-            mc = await MeshCore.create_ble(address=self.ble or None, pin=self.pin)
+            from . import blepair
+            if self.pin and self.ble and blepair.supported():
+                # meshcore never hands the PIN to the system, and bleak on Windows can't
+                # use one, so pair here first (does nothing if already paired).
+                await blepair.pair(self.ble, self.pin)
+            # Never pass the PIN to meshcore: it only makes the library call a pairing
+            # that macOS doesn't support (the connection then fails) and that can't use
+            # a PIN on Windows anyway. Pairing with a PIN is done above, or by the system.
+            mc = await MeshCore.create_ble(address=self.ble or None)
             if mc is None or not getattr(mc, "is_connected", True):
                 raise ConnectionError("no MeshCore radio answered over Bluetooth")
-            info = getattr(mc, "self_info", None)
-            self.radio_name = (info or {}).get("name", "") if isinstance(info, dict) else ""
         else:
             mc = await MeshCore.create_serial(self.port, self.baud)
             if mc is None or not getattr(mc, "is_connected", True):
                 raise ConnectionError("no answer from the radio")
+        await _ensure_self_info(mc, self.log)
+        info = getattr(mc, "self_info", None)
+        self.radio_name = (info or {}).get("name", "") if isinstance(info, dict) else ""
         self._EventType = EventType
         try:
             self.channel, _ = await find_or_create(mc, self.channel_name, EventType, self.log)
@@ -581,6 +598,78 @@ def pick_port() -> str:
 
 
 BLE_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # MeshCore's companion service
+
+
+async def _ensure_self_info(mc, log) -> None:
+    """Make sure we have the radio's description (name, frequency, SF, ...).
+
+    The library asks once while connecting and waits only 2 seconds. Over
+    Bluetooth, especially straight after pairing or on ESP32 radios like the
+    T-Beam, the answer can come later than that: the link works, but the
+    radio's settings are missing. Ask again, more patiently.
+    """
+    info = getattr(mc, "self_info", None)
+    if isinstance(info, dict) and info.get("radio_freq"):
+        return
+    ask = getattr(getattr(mc, "commands", None), "send_appstart", None)
+    if ask is None:
+        return
+    for wait in (5, 8):
+        try:
+            await ask(timeout=wait)
+        except Exception as exc:              # never fatal: MOSS works without the description
+            log(f"asking the radio to describe itself failed: {exc}")
+            return
+        info = getattr(mc, "self_info", None)
+        if isinstance(info, dict) and info.get("radio_freq"):
+            return
+    log("the radio didn't describe itself (name, frequency...); everything else still works")
+
+
+def _system() -> str:
+    from .blepair import system
+    return system()
+
+
+class StalePairing(SystemExit):
+    """The computer remembers a Bluetooth pairing the radio has forgotten."""
+
+
+# How each system reports "my saved pairing keys don't work any more".
+_STALE_SIGNS = (
+    "peer removed pairing",              # macOS: CBErrorDomain Code=14
+    "encryption is insufficient",        # macOS: CBATTErrorDomain Code=15
+    "insufficient encryption",
+    "insufficient authentication",       # Windows / BlueZ ATT errors
+    "authentication failed",             # BlueZ: org.bluez.Error.AuthenticationFailed
+    "authenticationfailed",
+)
+
+
+def is_stale_pairing(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(sign in text for sign in _STALE_SIGNS)
+
+
+def stale_pairing_help(address: str | None, exc: BaseException | None = None,
+                       platform: str | None = None) -> str:
+    """What to do when the computer and the radio disagree about being paired."""
+    platform = platform or _system()
+    who = address or "the radio"
+    if platform == "darwin":
+        steps = ("System Settings → Bluetooth, hover over the MeshCore radio, click ⓘ, "
+                 "then Forget This Device")
+    elif platform.startswith("win"):
+        steps = ("Settings → Bluetooth & devices → Devices, find the MeshCore radio, "
+                 "click ⋯ and choose Remove device")
+    else:
+        steps = "run  bluetoothctl remove " + (address or "<the radio's address>")
+    return (f"couldn't reach {who} over Bluetooth: this computer remembers an old pairing "
+            f"with the radio, but the radio has forgotten it (this happens after the radio is "
+            f"reflashed, reset, or paired with another computer)"
+            + (f".\n  ({exc})" if exc else ".") +
+            f"\n  Fix: forget the radio on this computer ({steps}), then try again. "
+            f"You'll be asked for the PIN: it's in the MeshCore app's settings, often 123456.")
 
 
 async def scan_ble(seconds: float = 6.0) -> list[tuple[str, str, int | None]]:

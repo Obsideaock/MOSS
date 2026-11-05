@@ -18,6 +18,9 @@ kept, and what's in the repository.
 | `page came through blighted` | Damaged or tampered page | Try again. Repeated blight with no interference around is worth investigating. |
 | `all N channel slots on this radio are in use` | No free slot to create #moss in | Remove a channel in the MeshCore app, or add `#moss` there yourself. |
 | `slot N is a channel called #moss with a different key` | Someone's private channel shares the name | Harmless; MOSS uses its own slot. Rename that channel if it's confusing. |
+| `this computer remembers an old pairing with the radio` (on a Mac: `Peer removed pairing information`) | The radio was reflashed, reset or paired elsewhere, but the computer kept the old pairing, so it never asks for the PIN | Forget the radio in the computer's Bluetooth settings (Mac: ⓘ → Forget This Device; Windows: Remove device; Linux: `bluetoothctl remove ADDRESS`), then try again and enter the PIN when asked. |
+| `Failed to connect to device` over Bluetooth, on Windows | The radio isn't paired with this computer yet (or has forgotten the pairing) | Run `moss setup` (or *Settings → Radio*), pick the radio, and say yes to *Pair with the radio using its PIN*. The PIN is in the MeshCore app's settings for that radio. |
+| `the radio didn't accept PIN ...` | Wrong PIN | Check it in the MeshCore app (that radio's settings) and try again. |
 | `couldn't reach the radio ... over Bluetooth` | Radio off, too far, or still connected to the phone app | Disconnect the phone app, bring it closer, try again; if asked, the PIN is in the MeshCore app (often 123456). |
 | No Bluetooth radios found in setup | Computer's Bluetooth off, or radio not advertising | Turn Bluetooth on; restart the radio; make sure it runs the Bluetooth companion firmware. |
 | `moss` isn't recognised | The terminal was open before installing | Open a new terminal (on Linux, or log out and in). |
@@ -50,6 +53,7 @@ Run `moss <command> --help` for every option.
 | Command | Where | What it does |
 |---|---|---|
 | *(nothing)* / `menu` | Both | The menu. |
+| `--version` | Both | Which MOSS this is. |
 | `setup [--role reader/vault] [--port P] [--zim Z] [--yes]` | Both | Set this machine up (the installers run this). |
 | `update [--branch main/experimental]` | Both | Newest MOSS from GitHub. |
 | `radio-check send/listen/info` | Both | Range test with pings on `#moss`; `info` shows the radio's settings. |
@@ -75,7 +79,7 @@ Run `moss <command> --help` for every option.
 | `radio-link FREQ BW SF CR` / `--public` | Both | Put this radio on a dedicated link, or back on the public mesh. |
 
 Options shared by radio commands: `--port`, `--ble [ADDRESS]` and `--pin`
-(Bluetooth instead of USB), `--channel-name` (default `#moss`), `--scope`,
+(Bluetooth instead of USB; MOSS pairs with the PIN itself on Windows), `--channel-name` (default `#moss`), `--scope`,
 `--route` (opt-in routing), `--cache`, `--debug`. Reader options: `--refresh` (ask over radio
 even if saved), `--quiet` (seconds of silence before asking for bare
 patches, default 6), `--idle`, `--plain`, `--no-pager`, and `--sim FOLDER_OR_ZIM`

@@ -56,7 +56,7 @@ class Link:
         cfg = load()
         if link:
             return cls(port=link)
-        return cls(cfg.get("port"), cfg.get("ble"), cfg.get("pin"))
+        return cls(cfg.get("port"), cfg.get("ble"))
 
 
 @contextlib.asynccontextmanager

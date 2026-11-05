@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import config, radiocheck, service
@@ -147,17 +148,28 @@ def _pick_link(ui, cfg: dict) -> "radiocheck.Link | None":
             return radiocheck.Link(port=port) if port else None
         ble = _pick_ble(ui, cfg.get("ble"))
         if ble is not None:
-            return radiocheck.Link(ble=ble, pin=cfg.get("pin"))
+            return radiocheck.Link(ble=ble)
 
 
-def _check_radio(ui, link) -> bool:
+_last_failure: BaseException | None = None      # why the last _check_radio failed
+
+
+PAIR_SETTLE_WAITS = (3.0, 5.0, 8.0)     # seconds to wait before each check after pairing
+
+
+def _check_radio(ui, link, quiet: bool = False) -> bool:
+    global _last_failure
     link = radiocheck.Link.of(link) if not isinstance(link, radiocheck.Link) else link
     where = f"Bluetooth ({link.ble or 'any MeshCore radio'})" if link.ble is not None else link.port
     lines: list[str] = []
+    _last_failure = None
     try:
         with ui.spin(f"talking to the radio on {where}..."):
             asyncio.run(radiocheck.info(link, out=lines.append, pause_vault=False))
     except (Exception, SystemExit) as exc:
+        _last_failure = exc
+        if quiet:                                   # a retry is coming; don't alarm anyone yet
+            return False
         ui.fail(f"couldn't use the radio on {where}: {exc}")
         if link.ble is None:
             ui.note("is another program (the MeshCore app, another terminal, the Seed Vault "
@@ -199,23 +211,87 @@ def _setup_reader(ui, cfg: dict, port: str | None, ask: bool, ble: str | None = 
     else:
         link = radiocheck.Link(port=port) if port else None
     if link is not None and not _check_radio(ui, link):
-        if ask and link.ble is not None and not link.pin and ui.confirm(
-                "Try again with a pairing PIN? (It's in the MeshCore app's settings; often 123456.)", True):
-            link.pin = ui.text("PIN:", "123456")
-            if _check_radio(ui, link):
-                return _save_reader(ui, link, ask)
+        if ask and _retry_radio(ui, link):
+            return _save_reader(ui, link, ask)
         if ask and ui.confirm("Pick a different radio?", True):
             return _setup_reader(ui, cfg, None, ask)
     return _save_reader(ui, link, ask)
 
 
+def _retry_radio(ui, link) -> bool:
+    """After a failed check: help the radio connect (pairing, PIN, stale pairing).
+    True once it answers. Used by setup and by Settings → Radio."""
+    from . import blepair
+    from .transport import StalePairing
+    if link.ble is None:
+        return False
+    if link.ble and blepair.supported():
+        # Windows: MOSS pairs the radio itself with its PIN, forgetting any old pairing.
+        return _pair_with_pin(ui, link)
+    if isinstance(_last_failure, StalePairing):
+        # The fix happens in the computer's Bluetooth settings; then a plain retry
+        # makes the computer ask for the PIN itself.
+        while ui.confirm("Forgotten the radio in your Bluetooth settings? Try again now?", True):
+            if _check_radio(ui, link):
+                return True
+            if not isinstance(_last_failure, StalePairing):
+                break
+        return False
+    if blepair.system() == "darwin":
+        # macOS only takes a PIN through its own pop-up window, never from MOSS.
+        ui.note("On a Mac the PIN goes into the window macOS pops up (the PIN is in the "
+                "MeshCore app, or on the radio's screen). If no window appeared, forget the "
+                "radio in System Settings → Bluetooth first.")
+        return ui.confirm("Try again?", True) and _check_radio(ui, link)
+    # Linux: BlueZ asks for the PIN through its own pairing agent.
+    ui.note(f"To pair with the radio's PIN on Linux: run  bluetoothctl , then  "
+            f"scan on , then  pair {link.ble or '<address>'}  and type the PIN from the "
+            f"MeshCore app (or the radio's screen) when asked.")
+    return ui.confirm("Paired it? Try again?", True) and _check_radio(ui, link)
+
+
+def _pair_with_pin(ui, link) -> bool:
+    """Pair (again) with the radio's PIN, then check it answers. Windows only."""
+    from . import blepair
+    if not ui.confirm("Pair with the radio using its PIN? (MOSS forgets any old pairing with "
+                      "it first.)", True):
+        return False
+    ui.note("The PIN is in the MeshCore app (that radio's settings) or, on radios with a "
+            "screen, shown on the radio while pairing. Disconnect the phone app first.")
+    while True:
+        pin = ui.text("Radio's PIN (from the MeshCore app, or the radio's screen):", "")
+        try:
+            with ui.spin("pairing with the radio..."):
+                asyncio.run(blepair.pair(link.ble, pin, fresh=True))
+        except blepair.WrongPin as exc:
+            ui.fail(str(exc))
+            if ui.confirm("Try a different PIN?", True):
+                continue
+            return False
+        except (Exception, SystemExit) as exc:
+            ui.fail(f"pairing failed: {exc}")
+            if ui.confirm("Try pairing again?", True):
+                continue
+            return False
+        ui.ok("paired")
+        link.pin = pin
+        # Windows needs a few seconds after pairing before the radio will talk; the very
+        # first connection straight after pairing often fails, then works a moment later.
+        for wait in PAIR_SETTLE_WAITS:
+            with ui.spin("letting Windows finish pairing..."):
+                time.sleep(wait)
+            if _check_radio(ui, link, quiet=wait != PAIR_SETTLE_WAITS[-1]):
+                return True
+        return False
+
+
 def _save_reader(ui, link, ask: bool) -> int:
     if link is None:
-        config.update(role="reader", port=None, ble=None, pin=None)
+        config.update(role="reader", port=None, ble=None)
     elif link.ble is not None:
-        config.update(role="reader", port=None, ble=link.ble, pin=link.pin)
+        config.update(role="reader", port=None, ble=link.ble)     # never the PIN
     else:
-        config.update(role="reader", port=link.port, ble=None, pin=None)
+        config.update(role="reader", port=link.port, ble=None)
     ui.ok("saved: this machine is a reader, radio " + config.radio_label(config.load())
           if link else "saved: this machine is a reader, no radio yet")
     if ask:

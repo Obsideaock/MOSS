@@ -40,6 +40,22 @@ def current(repo: Path | None = None) -> str:
         return "unknown (not a git checkout)"
 
 
+def install_packages(repo: Path, out=print) -> bool:
+    """pip install -e the repo. pip and setuptools print pages of harmless build
+    notes (deprecations, "Editable installation"), so show them only on failure."""
+    out("updating Python packages...")
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "-e", str(repo)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        detail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+        for line in detail[-15:]:
+            out(f"  {line}")
+        out("  pip had trouble (above); try: moss update again, or reinstall")
+        return False
+    out("Python packages up to date")
+    return True
+
+
 def update(branch: str | None = None, repo: Path | None = None, out: Out = print,
            install_deps: bool = True, restart: bool | None = None) -> bool:
     """Returns True if anything changed."""
@@ -90,10 +106,7 @@ def update(branch: str | None = None, repo: Path | None = None, out: Out = print
     if len(lines) > 15:
         out(f"  ...and {len(lines) - 15} more")
     if install_deps:
-        out("updating Python packages...")
-        r = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "-e", str(repo)])
-        if r.returncode != 0:
-            out("  pip had trouble; try: moss update again, or reinstall")
+        install_packages(repo, out)
     if restart is None:
         restart = cfg.get("role") == "vault" and service.available() and service.is_active()
     if restart:
