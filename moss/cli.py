@@ -454,7 +454,8 @@ async def cmd_gateway(args) -> int:
     vprint = VaultPrint(Path(args.keys or DEFAULT_VAULT_KEYS))
     gw = Gateway(tx, source, gap=args.gap, rounds=args.rounds, wait=args.wait, keys=keys,
                  pad_sizes=args.pad_sizes, log_queries=args.log_queries, pages=store,
-                 library=what, spore_print=vprint, log=lambda m: print(m, flush=True))
+                 library=what, spore_print=vprint, log=lambda m: print(m, flush=True),
+                 answer_pings=not args.no_pings)
     size = (f"articles shortened to about {args.max_bytes} bytes" if args.max_bytes
             else "full articles")
     where = f"{tx.channel_name} (slot {tx.channel})" + (f", scope {args.scope}" if tx.scoped else "")
@@ -765,6 +766,8 @@ def build_parser() -> argparse.ArgumentParser:
                                    "~/.moss/seed-vault/pages)")
     g.add_argument("--no-uploads", action="store_true",
                    help="serve community pages already here, but take no new uploads")
+    g.add_argument("--no-pings", action="store_true",
+                   help="don't answer range-test pings from the phone app")
     g.add_argument("--page-cap", type=int, default=250, help="biggest page accepted, in spores (default 250)")
     g.add_argument("--uploads-per-author", type=int, default=3, help="uploads per author per day (default 3)")
     g.add_argument("--upload-budget", type=int, default=2000,

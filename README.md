@@ -61,6 +61,8 @@ encrypted: other people on the mesh can't tell what you're reading.
 - **Read privately.** Searches and pages are encrypted end to end.
 - **Use a cable or Bluetooth** to reach your radio, on Windows, Mac or
   Linux.
+- **Range-test from an iPhone** with the [MOSS Radio app](ios/MossRadio/README.md):
+  pings mapped with their signal both ways, and Wikipedia on the go.
 
 <table>
   <tr>
@@ -268,6 +270,7 @@ off the shared mesh entirely: see
 | [Reference](docs/reference.md) | Troubleshooting, every command, where files are kept, the code layout |
 | [Testing](docs/testing.md) | The automated tests, and testing your own radios |
 | [Roadmap](docs/roadmap.md) | What's done, what's next, ideas for later |
+| [iPhone app](ios/MossRadio/README.md) | MOSS Radio: range-test the link to a Seed Vault, and read Wikipedia, from an iPhone |
 | [Security](SECURITY.md) | How to report a security problem privately |
 
 ---

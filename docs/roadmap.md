@@ -11,6 +11,12 @@ MOSS grows a little at a time. What's done, what's next, and ideas for later.
 4. **Locked pages**: pages that need a password to read
 5. **Owner tools**: a removal log, a review queue, quiet-hours scheduling
 
+## The iPhone app (MOSS Radio)
+
+1. **Range testing and reading Wikipedia**: done (version 0.1, in `ios/MossRadio`)
+2. Community pages: opening, then writing and uploading them
+3. Vault specs and spore prints
+
 ## Ideas for later
 
 - **Searching across vaults**: finding pages that only live on another

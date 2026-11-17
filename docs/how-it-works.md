@@ -160,6 +160,8 @@ people's transfers.
 | 14 | UCHUNK (upload spore) | type 1, id 2, number 2, data up to 158 | reader → vault |
 | 15 | UNACK (upload bare patch) | type 1, id 2, count 1, numbers 2 each | vault → reader |
 | 16 | SRESULT (upload result) | type 1, id 2, sealed stored-or-not and message, check 16 | vault → reader |
+| 17 | PING (range test) | type 1, run id 2, number 2, flags 1 (1 = sent zero-hop) | reader → vault |
+| 18 | PONG (range-test answer) | type 1, run id 2, number 2, SNR×4 1, RSSI 1 (127 = unknown), hops 1 (255 = direct route), flags 1, vault name | vault → reader |
 
 A sealed request carries a *kind*:
 

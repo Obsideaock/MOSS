@@ -147,13 +147,17 @@ class FakeRadio:
                 self.unreadable -= 1
             return Event(EventType.ERROR, {"reason": "no_event_received"})
         if self.inbox:
-            slot, raw = self.inbox.pop(0)
+            slot, raw, *extra = self.inbox.pop(0)
+            extra = extra[0] if extra else {}
             if isinstance(raw, str):
                 await self.fire(EventType.CHANNEL_MSG_RECV,
                                 {"channel_idx": slot, "text": raw, "SNR": 6.5})
                 return Event(EventType.CHANNEL_MSG_RECV, {})
+            if "rssi" in extra:            # the radio logs the packet (with RSSI) first
+                await self.fire(EventType.RX_LOG_DATA, {"snr": extra.get("SNR"), "rssi": extra["rssi"]})
             await self.fire(EventType.CHANNEL_DATA_RECV,
-                            {"channel_idx": slot, "data_type": 0xFF01, "payload": raw.hex()})
+                            {"channel_idx": slot, "data_type": 0xFF01, "payload": raw.hex(),
+                             **{k: v for k, v in extra.items() if k != "rssi"}})
             return Event(EventType.CHANNEL_DATA_RECV, {})
         return Event(EventType.NO_MORE_MSGS, {})
 

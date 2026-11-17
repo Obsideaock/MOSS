@@ -72,7 +72,8 @@ class Gateway:
                  pad_sizes: bool = False, log_queries: bool = False,
                  capsule_every: int = 50, pages=None, upload_quiet: float = 6.0,
                  upload_idle: float = 120.0, max_nacks: int = 14,
-                 nack_spacing: float = 1.0, library: str = "", spore_print=None):
+                 nack_spacing: float = 1.0, library: str = "", spore_print=None,
+                 answer_pings: bool = True, ping_gap: float = 3.0):
         """gap     seconds between datagrams (airtime pacing)
         wait    how long to listen for NACK/DONE after the last chunk; must be
                 comfortably longer than the client's --quiet
@@ -91,6 +92,9 @@ class Gateway:
         pages       a PageStore: serve community pages and take uploads
         upload_quiet  seconds of silence mid-upload before asking for what's missing
         upload_idle   give up on an upload after this long with nothing heard
+        answer_pings  answer range-test PINGs with a PONG saying how well each was
+                    heard (one short datagram; zero-hop pings get zero-hop answers)
+        ping_gap    never answer pings more often than this (seconds), whoever sends them
         """
         self.tx, self.source = tx, source
         self.gap, self.rounds, self.wait, self.settle = gap, rounds, wait, settle
@@ -105,6 +109,11 @@ class Gateway:
         self.max_nacks, self.nack_spacing = max_nacks, nack_spacing
         self._last_hello = 0.0
         self._answered: list[bytes] = []            # recent WHOIS already answered
+        self.answer_pings, self.ping_gap = answer_pings, ping_gap
+        self._last_pong = 0.0
+        self._ponged: list[tuple[int, int]] = []    # recent (run, sequence) already answered
+        self.pongs = 0
+        self._pong_tasks: set = set()
         self.sessions: dict[int, Session] = {}
         self.queue: asyncio.Queue[Session] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
@@ -160,6 +169,8 @@ class Gateway:
                                        route=route_of(raw) if route_of else None)
             elif kind == S.WHOIS and self.keys is not None:
                 await self._hello(asked_by=raw[:3])
+            elif kind == P.PING and self.answer_pings and len(raw) >= 6:
+                await self._pong(raw)
             elif kind == P.NACK:
                 rid, missing = P.parse_nack(raw)
                 s = self.sessions.get(rid)
@@ -193,6 +204,40 @@ class Gateway:
                     s.wake.set()
         except Exception as exc:        # a garbled datagram must never kill the gateway
             self.log(f"  ignoring bad datagram: {exc!r}")
+
+    async def _pong(self, raw: bytes) -> None:
+        """Answer a range-test ping with how well we heard it. Rate-limited so
+        pings can never make the vault a noisy neighbour, and each ping is
+        answered once even if a copy arrives again through a repeater."""
+        signal = dict(getattr(self.tx, "last_signal", None) or {})   # read before any await
+        pid, seq, flags = P.parse_ping(raw)
+        now = time.monotonic()
+        if (pid, seq) in self._ponged or now - self._last_pong < self.ping_gap:
+            return
+        self._ponged.append((pid, seq))
+        del self._ponged[:-64]
+        self._last_pong = now
+        zero_hop = bool(flags & P.PING_ZERO_HOP) and signal.get("hops") in (None, 255)
+        name = self.keys.name if self.keys is not None else ""
+        pong = P.build_pong(pid, seq, signal.get("snr"), signal.get("rssi"), signal.get("hops"),
+                            P.PING_ZERO_HOP if zero_hop else 0, name)
+        self.pongs += 1
+        # Sent from its own task: a radio may hand us the ping while it's still
+        # busy with the poll that fetched it, so waiting here could stall both.
+        task = asyncio.create_task(self._send_pong(pong, zero_hop))
+        self._pong_tasks.add(task)
+        task.add_done_callback(self._pong_tasks.discard)
+
+    async def _send_pong(self, pong: bytes, zero_hop: bool) -> None:
+        try:
+            if zero_hop:
+                await self.tx.send(pong, zero_hop=True)
+            else:
+                await self.tx.send(pong)
+        except TypeError:                     # a transport that can't send zero-hop
+            await self.tx.send(pong)
+        except Exception as exc:
+            self.log(f"  couldn't answer a ping: {exc!r}")
 
     def _error(self, rid: int, message: str, seal: "S.VaultSession | None") -> bytes:
         """Errors can name what was asked for ("no such article: ..."), so an

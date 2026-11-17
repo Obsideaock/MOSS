@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>MOSS Radio</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>MOSS Radio talks to your MeshCore radio over Bluetooth to send range-test pings and read from the Seed Vault.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Range tests record where each ping was sent from, so you can see on a map how far the radio reaches. Locations stay on this iPhone.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Range tests record where each ping was sent from, so you can see on a map how far the radio reaches. Locations stay on this iPhone.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>location</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

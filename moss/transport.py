@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -66,8 +67,10 @@ class SimTransport:
         self.handlers: list[Handler] = []
         self.closed = False
         self.drop_next: list = []      # predicates for deterministic loss in tests
+        self.last_signal: dict = {}    # how the latest datagram arrived (made-up numbers here)
 
-    async def send(self, datagram: bytes, path: bytes | None = None) -> None:
+    async def send(self, datagram: bytes, path: bytes | None = None,
+                   zero_hop: bool = False) -> None:
         if len(datagram) > MAX_DATAGRAM:
             raise ValueError(f"datagram is {len(datagram)} bytes, max {MAX_DATAGRAM}")
         net = self.net
@@ -81,7 +84,7 @@ class SimTransport:
                 net.dropped += 1
                 continue
             asyncio.get_running_loop().call_later(
-                net.latency, lambda o=other: asyncio.ensure_future(o._deliver(datagram)))
+                net.latency, lambda o=other: asyncio.ensure_future(o._deliver(datagram, zero_hop)))
 
     def _should_drop(self, raw: bytes) -> bool:
         for pred in list(self.drop_next):
@@ -90,9 +93,10 @@ class SimTransport:
                 return True
         return False
 
-    async def _deliver(self, raw: bytes) -> None:
+    async def _deliver(self, raw: bytes, zero_hop: bool = False) -> None:
         if self.closed:
             return
+        self.last_signal = {"snr": 8.0, "rssi": -70, "hops": 255 if zero_hop else 0}
         for h in list(self.handlers):
             await _call(h, raw)
 
@@ -154,6 +158,8 @@ class MeshCoreTransport:
         self._heard_log: list[tuple[bytes, bytes]] = []      # (decrypted #moss packet, route) recent
         self._routes: dict[bytes, bytes] = {}                # datagram digest -> route back
         self.routed_sends = 0
+        self._last_log: tuple | None = None    # (snr, rssi, when) of the last packet the radio logged
+        self.last_signal: dict = {}            # how the latest datagram arrived: snr, rssi, hops
         self.ble, self.pin = ble, pin          # ble None: USB serial
         self.radio_name = ""
         self.channel_name, self.scope = channel_name, scope
@@ -428,9 +434,11 @@ class MeshCoreTransport:
         """Every packet the radio hears shows up in its log with the route it
         took. Keep the routes of flooded #moss packets, decrypted, so the
         datagram that arrives a moment later can be matched to its route."""
+        p = event.payload if isinstance(event.payload, dict) else {}
+        if p.get("rssi") is not None:
+            self._last_log = (p.get("snr"), p.get("rssi"), time.monotonic())
         if not self.route:
             return
-        p = event.payload if isinstance(event.payload, dict) else {}
         try:
             if p.get("payload_type") != 6 or p.get("route_type") not in (0, 1):    # GRP_DATA, flooded
                 return
@@ -462,7 +470,8 @@ class MeshCoreTransport:
         it was learned; None means flood."""
         return self._routes.get(_digest(raw)) if self.route else None
 
-    async def send(self, datagram: bytes, path: bytes | None = None) -> None:
+    async def send(self, datagram: bytes, path: bytes | None = None,
+                   zero_hop: bool = False) -> None:
         """Hand one datagram to the radio. The radio can *refuse* (its queue is
         full, or it's busy): that comes back as an error reply, not an
         exception, and used to be silently ignored, so a reader could keep
@@ -476,10 +485,14 @@ class MeshCoreTransport:
                     await asyncio.wait_for(self._up.wait(), self.SEND_WAIT)
                 except asyncio.TimeoutError:
                     return                    # lost in the air; the protocol repeats it
-            routed = path is not None and self.route
+            routed = path is not None and self.route and not zero_hop
             try:
                 async with self._cmd:
-                    if routed:
+                    if zero_hop:
+                        # A direct route with no repeaters: only radios in range hear it.
+                        ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
+                                                                      datagram, path=b"")
+                    elif routed:
                         ev = await self.mc.commands.send_channel_data(self.channel, self.data_type,
                                                                       datagram, path=path)
                     else:
@@ -555,6 +568,15 @@ class MeshCoreTransport:
                 return
         if not isinstance(raw, (bytes, bytearray)):
             return
+        # How this datagram arrived, for anyone who asks (range-test answers):
+        # SNR and hops come with the message; RSSI only from the radio's packet
+        # log, taken if a log entry with the same SNR was heard just before.
+        snr = p.get("SNR")
+        rssi = None
+        log = self._last_log
+        if log and time.monotonic() - log[2] < 5 and (snr is None or log[0] == snr):
+            rssi = log[1]
+        self.last_signal = {"snr": snr, "rssi": rssi, "hops": p.get("path_len")}
         if self.route:
             self._remember_route(bytes(raw))
         for h in list(self.handlers):

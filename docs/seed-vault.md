@@ -138,6 +138,7 @@ Set these from `moss` → *Extra options*, or put them in `MOSS_EXTRA=` in
 | `--upload-budget 2000` | Spores of uploads per day for the whole vault. |
 | `--page-storage-mb 2048` | Room for community pages. |
 | `--no-uploads` | Serve the community pages already here, but take no new ones. |
+| `--no-pings` | Don't answer range-test pings from the [iPhone app](../ios/MossRadio/README.md). Answers are on by default, at most one every 3 seconds, and a zero-hop ping gets a zero-hop answer, so they never travel through repeaters unless the ping did. |
 | `--pages DIR` | Where community pages are kept (default `~/.moss/seed-vault/pages`). |
 
 ---

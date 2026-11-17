@@ -29,6 +29,11 @@ MANIFEST, CHUNK, NACK, DONE, REQUEST, STATUS, ERROR = 1, 2, 3, 4, 5, 6, 7
 # Uploads run the transfer the other way: the reader sends UCHUNKs and the
 # Seed Vault answers with UNACKs (same layouts as CHUNK and NACK).
 UCHUNK, UNACK = 14, 15
+# Range testing: a reader sends PINGs, the Seed Vault answers each with a PONG
+# saying how well it heard it. Not encrypted: they carry nothing but numbers.
+PING, PONG = 17, 18
+PING_ZERO_HOP = 1                 # flag: sent without repeaters; answer the same way
+SIGNAL_UNKNOWN = 127              # rssi/snr byte when the radio didn't say
 
 CHUNK_HEADER = 5                              # type(1) + tid(2) + index(2)
 CHUNK_BYTES = MAX_DATAGRAM - CHUNK_HEADER     # 158 bytes of page per datagram
@@ -140,6 +145,44 @@ def build_error(rid: int, message: str) -> bytes:
 def parse_error(raw: bytes) -> tuple[int, str]:
     _, rid = struct.unpack("<BH", raw[:3])
     return rid, raw[3:].decode(errors="replace")
+
+
+# ---------------------------------------------------------------- range test
+
+def build_ping(pid: int, seq: int, flags: int = 0) -> bytes:
+    """PING  17 | run id 2 | sequence 2 | flags 1"""
+    return struct.pack("<BHHB", PING, pid, seq, flags)
+
+
+def parse_ping(raw: bytes) -> tuple[int, int, int]:
+    _, pid, seq, flags = struct.unpack("<BHHB", raw[:6])
+    return pid, seq, flags
+
+
+def _signal_byte(value, scale: float) -> int:
+    if value is None:
+        return SIGNAL_UNKNOWN
+    return max(-128, min(126, round(float(value) * scale))) & 0xFF
+
+
+def build_pong(pid: int, seq: int, snr: float | None, rssi: int | None, hops: int | None,
+               flags: int, name: str = "") -> bytes:
+    """PONG  18 | run id 2 | sequence 2 | snr×4 (int8) | rssi (int8) | hops 1 | flags 1 | name
+
+    snr/rssi: how the Seed Vault heard the ping (127 = unknown). hops: the
+    path length the ping arrived with (255: came by direct route, i.e. zero-hop)."""
+    head = struct.pack("<BHHBBBB", PONG, pid, seq, _signal_byte(snr, 4), _signal_byte(rssi, 1),
+                       255 if hops is None else hops & 0xFF, flags)
+    body = name.encode()[:MAX_DATAGRAM - len(head)].decode(errors="ignore").encode()
+    return head + body
+
+
+def parse_pong(raw: bytes) -> dict:
+    _, pid, seq, snr, rssi, hops, flags = struct.unpack("<BHHbbBB", raw[:9])
+    return {"pid": pid, "seq": seq,
+            "snr": None if snr == SIGNAL_UNKNOWN else snr / 4,
+            "rssi": None if rssi == SIGNAL_UNKNOWN else rssi,
+            "hops": hops, "flags": flags, "name": raw[9:].decode(errors="replace")}
 
 
 def peek_tid(raw: bytes) -> int | None:
